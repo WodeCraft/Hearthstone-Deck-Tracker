@@ -109,6 +109,7 @@
             </UniformGrid>
             <local:CardToolTip x:Name="ToolTipCard" Height="auto" Canvas.Left="323" Canvas.Top="203" Visibility="Hidden"/>
             <StackPanel Name="StackPanelAdditionalTooltips" Width="auto" Height="auto" Visibility="Collapsed"></StackPanel>
+            <local:HearthstoneTextBlock x:Name="lblPotentialDecks" Text="0" FontSize="20" Canvas.Left="233" Canvas.Top="297" Width="100"/>
         </Canvas>
 
     </Grid>
