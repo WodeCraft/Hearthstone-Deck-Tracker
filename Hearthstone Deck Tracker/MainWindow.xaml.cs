@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
@@ -10,12 +11,24 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Data;
+using System.Windows.Forms;
 using System.Windows.Input;
 using System.Windows.Media;
-using MahApps.Metro.Controls;
+using System.Windows.Navigation;
+using System.Xml.Serialization;
+using Hearthstone_Deck_Tracker.Hearthstone;
+using MahApps.Metro;
 using MahApps.Metro.Controls.Dialogs;
 using Microsoft.Win32;
+using Application = System.Windows.Application;
+using Brush = System.Windows.Media.Brush;
+using Color = System.Windows.Media.Color;
+using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using ListViewItem = System.Windows.Controls.ListViewItem;
+using MessageBox = System.Windows.MessageBox;
+using MouseEventArgs = System.Windows.Forms.MouseEventArgs;
+using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
+using SystemColors = System.Windows.SystemColors;
 
 #endregion
 
@@ -26,761 +39,502 @@ namespace Hearthstone_Deck_Tracker
     /// </summary>
     public partial class MainWindow
     {
-        private const bool IS_DEBUG = false;
+		#region Properties
 
-        private readonly Config _config;
-        private readonly Decks _deckList;
-        private readonly Hearthstone _hearthstone;
+		public readonly Decks DeckList;
+		public readonly Version NewVersion;
+		public readonly OpponentWindow OpponentWindow;
+		public readonly OverlayWindow Overlay;
+		public readonly PlayerWindow PlayerWindow;
+		public readonly TimerWindow TimerWindow;
+		private readonly string _configPath;
+		private readonly string _decksPath;
+		private readonly bool _foundHsDirectory;
         private readonly bool _initialized;
 
         private readonly string _logConfigPath =
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) +
             @"\Blizzard\Hearthstone\log.config";
 
-        private readonly HsLogReader _logReader;
-        private readonly System.Windows.Forms.NotifyIcon _notifyIcon;
-        private readonly OpponentWindow _opponentWindow;
-        private readonly OverlayWindow _overlay;
-        private readonly PlayerWindow _playerWindow;
-        private readonly XmlManager<Decks> _xmlManager;
-        private readonly XmlManager<Config> _xmlManagerConfig;
-        private readonly DeckImporter _deckImporter;
-        private readonly DeckExporter _deckExporter;
-        private bool _editingDeck;
-        private bool _newContainsDeck;
-        private Deck _newDeck;
-        private bool _doUpdate;
-        private bool _showingIncorrectDeckMessage;
-        private bool _showIncorrectDeckMessage;
-        private readonly Version _newVersion;
-        private TurnTimer _turnTimer;
+		private readonly NotifyIcon _notifyIcon;
+		private readonly bool _updatedLogConfig;
         
+		public bool EditingDeck;
 
-        public MainWindow()
-        {
-            InitializeComponent();
-            var version = Helper.CheckForUpdates(out _newVersion);
-            if (version != null)
+		public ReadOnlyCollection<string> EventKeys =
+			new ReadOnlyCollection<string>(new[] { "None", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12" });
+
+		public bool IsShowingIncorrectDeckMessage;
+		public bool NeedToIncorrectDeckMessage;
+		public Deck NewDeck;
+		private bool _doUpdate;
+		private bool _newContainsDeck;
+
+		public bool ShowToolTip
             {
-                TxtblockVersion.Text = string.Format("Version: {0}.{1}.{2}", version.Major, version.Minor,
-                                                     version.Build);
+			get { return Config.Instance.TrackerCardToolTips; }
             }
 
-            //check for log config and create if not existing
-            try
+		#endregion
+
+		#region GENERAL GUI
+
+		private int _lastSelectedTab;
+
+		private void MetroWindow_Activated(object sender, EventArgs e)
             {
-                if (!File.Exists(_logConfigPath))
-                {
-                    File.Copy("Files/log.config", _logConfigPath);
+			Topmost = true;
                 }
-                else
+
+		private void MetroWindow_Deactivated(object sender, EventArgs e)
                 {
-                    //update log.config if newer
-                    var localFile = new FileInfo(_logConfigPath);
-                    var file = new FileInfo("Files/log.config");
-                    if (file.LastWriteTime > localFile.LastWriteTime)
-                    {
-                        File.Copy("Files/log.config", _logConfigPath, true);
+			Topmost = false;
                     }
+
+		private void MetroWindow_StateChanged(object sender, EventArgs e)
+            {
+			if (Config.Instance.MinimizeToTray && WindowState == WindowState.Minimized)
+                {
+				MinimizeToTray();
                 }
-            }
-            catch (UnauthorizedAccessException e)
-            {
-                MessageBox.Show(
-                    e.Message + "\n\n" + e.InnerException +
-                    "\n\n Please restart the tracker as administrator",
-                    "Error writing log.config");
-                Close();
-                return;
-            }
-            catch (Exception e)
-            {
-                MessageBox.Show(
-                    e.Message + "\n\n" + e.InnerException +
-                    "\n\n What happend here? ",
-                    "Error writing log.config");
-                Close();
-                return;
             }
 
-            //load config
-            _config = new Config();
-            _xmlManagerConfig = new XmlManager<Config> {Type = typeof (Config)};
-            if (!File.Exists(_config.ConfigPath))
+		private void MinimizeToTray()
             {
-                using (var sr = new StreamWriter(_config.ConfigPath, false))
-                {
-                    sr.WriteLine("<Config></Config>");
-                }
+			_notifyIcon.Visible = true;
+			//_notifyIcon.ShowBalloonTip(2000, "Hearthstone Deck Tracker", "Minimized to tray", ToolTipIcon.Info);
+			Hide();
             }
+
+		private void Window_Closing(object sender, CancelEventArgs e)
+            {
             try
             {
-                _config = _xmlManagerConfig.Load("config.xml");
-                if(_config.SelectedTags.Count == 0)
-                    _config.SelectedTags.Add("All");
+				_doUpdate = false;
+				Config.Instance.SelectedTags = Config.Instance.SelectedTags.Distinct().ToList();
+				Config.Instance.ShowAllDecks = DeckPickerList.ShowAll;
+				Config.Instance.WindowHeight = (int)Height;
+				Overlay.Close();
+				HsLogReader.Instance.Stop();
+				TimerWindow.Shutdown();
+				PlayerWindow.Shutdown();
+				OpponentWindow.Shutdown();
+				Config.Save();
+				WriteDecks();
             }
-            catch (Exception e)
+			catch (Exception)
             {
-                MessageBox.Show(
-                    e.Message + "\n\n" + e.InnerException +
-                    "\n\n If you don't know how to fix this, please delete config.xml",
-                    "Error loading config.xml");
-                Close();
-                return;
+				//doesnt matter
             }
-            _config.Debug = IS_DEBUG;
+            }
 
-            //load saved decks
-            if (!File.Exists("PlayerDecks.xml"))
-            {
-                //avoid overwriting decks file with new releases.
-                using (var sr = new StreamWriter("PlayerDecks.xml", false))
-                {
-                    sr.WriteLine("<Decks></Decks>");
-                }
-            }
-            _xmlManager = new XmlManager<Decks> {Type = typeof (Decks)};
-            try
-            {
-                _deckList = _xmlManager.Load("PlayerDecks.xml");
-            }
-            catch (Exception e)
-            {
-                MessageBox.Show(
-                    e.Message + "\n\n" + e.InnerException +
-                    "\n\n If you don't know how to fix this, please delete PlayerDecks.xml (this will cause you to lose your decks).",
-                    "Error loading PlayerDecks.xml");
-                Close();
-                return;
-            }
-            foreach (var deck in _deckList.DecksList)
-            {
-                DeckPickerList.AddDeck(deck);
-            }
-            DeckPickerList.SelectedDeckChanged += DeckPickerListOnSelectedDeckChanged;
-            //ListboxDecks.ItemsSource = _deckList.DecksList;
-
-            _notifyIcon = new System.Windows.Forms.NotifyIcon();
-            _notifyIcon.Icon = new Icon(@"Images/HearthstoneDeckTracker.ico");
-            _notifyIcon.MouseDoubleClick += NotifyIconOnMouseDoubleClick;
+		private void NotifyIconOnMouseDoubleClick(object sender, MouseEventArgs mouseEventArgs)
+		{
             _notifyIcon.Visible = false;
+			Show();
+			WindowState = WindowState.Normal;
+			Activate();
+		}
 
-
-            //hearthstone, loads db etc
-            _hearthstone = new Hearthstone();
-            _hearthstone.Reset();
-            _newDeck = new Deck();
-            ListViewNewDeck.ItemsSource = _newDeck.Cards;
-
-
-            //create overlay
-            _overlay = new OverlayWindow(_config, _hearthstone) {Topmost = true};
-            _overlay.Show();
-
-            _playerWindow = new PlayerWindow(_config, _hearthstone.PlayerDeck);
-            _opponentWindow = new OpponentWindow(_config, _hearthstone.EnemyCards);
-
-            if (_config.WindowsOnStartup)
+		private void BtnSortFilter_Click(object sender, RoutedEventArgs e)
             {
-                _playerWindow.Show();
-                _opponentWindow.Show();
-            }
-            if (!_deckList.AllTags.Contains("All"))
-            {
-                _deckList.AllTags.Add("All");
-                _xmlManager.Save("PlayerDecks.xml", _deckList);
-            }
-            if (!_deckList.AllTags.Contains("Arena"))
-            {
-                _deckList.AllTags.Add("Arena");
-                _xmlManager.Save("PlayerDecks.xml", _deckList);
-            }
-            if (!_deckList.AllTags.Contains("Constructed"))
-            {
-                _deckList.AllTags.Add("Constructed");
-                _xmlManager.Save("PlayerDecks.xml", _deckList);
+			FlyoutSortFilter.IsOpen = !FlyoutSortFilter.IsOpen;
             }
 
-            LoadConfig();
-            
-            //find hs directory
-            if (!File.Exists(_config.HearthstoneDirectory + @"\Hearthstone.exe"))
+		private void SortFilterDecksFlyoutOnSelectedTagsChanged(SortFilterDecks sender, List<string> tags)
             {
-                MessageBox.Show("Please specify your Hearthstone directory", "Hearthstone directory not found",
-                                MessageBoxButton.OK);
-                var dialog = new OpenFileDialog();
-                dialog.Title = "Select Hearthstone.exe";
-                dialog.DefaultExt = "Hearthstone.exe";
-                dialog.Filter = "Hearthstone.exe|Hearthstone.exe";
-                var result = dialog.ShowDialog();
-                if (result != true)
-                {
+			DeckPickerList.SetSelectedTags(tags);
+			Config.Instance.SelectedTags = tags;
+			Config.Save();
+            }
+
+		private void MetroWindow_Loaded(object sender, RoutedEventArgs e)
+            {
+			var presentationsource = PresentationSource.FromVisual(this);
+			if (presentationsource != null) // make sure it's connected
+            {
+				Helper.DpiScalingX = presentationsource.CompositionTarget.TransformToDevice.M11;
+				Helper.DpiScalingY = presentationsource.CompositionTarget.TransformToDevice.M22;
+            }
+			if (!_foundHsDirectory)
+            {
+				ShowHsNotInstalledMessage();
                     return;
                 }
-                _config.HearthstoneDirectory = Path.GetDirectoryName(dialog.FileName);
-                _xmlManagerConfig.Save("config.xml", _config);
+			if (NewVersion != null)
+			{
+				ShowNewUpdateMessage();
+            }
+			if (_updatedLogConfig)
+            {
+				ShowMessage("Restart Hearthstone",
+							"This is either your first time starting the tracker or the log.config file has been updated. Please restart Heartstone once, for the tracker to work properly.");
             }
 
-            _deckImporter = new DeckImporter(_hearthstone);
-            _deckExporter = new DeckExporter(_config);
+			//preload the manacurve in new deck
+			TabControlTracker.SelectedIndex = 1;
+			TabControlTracker.UpdateLayout();
+			TabControlTracker.SelectedIndex = 0;
 
-            //this has to happen before reader starts
-            var lastDeck = _deckList.DecksList.FirstOrDefault(d => d.Name == _config.LastDeck);
-            DeckPickerList.SelectDeck(lastDeck);
+			ManaCurveMyDecks.UpdateValues();
+        }
+
+		private void MetroWindow_LocationChanged(object sender, EventArgs e)
+        {
+			if (WindowState == WindowState.Minimized) return;
+			Config.Instance.TrackerWindowTop = (int)Top;
+			Config.Instance.TrackerWindowLeft = (int)Left;
+        }
+
+		private void TabControlTracker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+			if (!_initialized) return;
+			if (_lastSelectedTab == TabControlTracker.SelectedIndex) return;
+			_lastSelectedTab = TabControlTracker.SelectedIndex;
+			UpdateTabMarker();
+            }
+
+		private async void UpdateTabMarker()
+            {
+			var tabItem = TabControlTracker.SelectedItem as TabItem;
+			if (tabItem == null) return;
+			await Task.Delay(50);
+			SelectedTabMarker.Width = tabItem.ActualWidth;
+			var offset = TabControlTracker.Items.Cast<TabItem>().TakeWhile(t => t != tabItem).Sum(t => t.ActualWidth);
+			SelectedTabMarker.Margin = new Thickness(offset, 40, 0, 0);
+		}
+
+		#endregion
+
+		#region GENERAL METHODS
+
+		public void ShowIncorrectDeckMessage()
+		{
+			var decks =
+				DeckList.DecksList.Where(
+					d => d.Class == Game.PlayingAs && Game.PlayerDrawn.All(c => d.Cards.Contains(c))
+					).ToList();
+			if (decks.Contains(DeckPickerList.SelectedDeck))
+				decks.Remove(DeckPickerList.SelectedDeck);
+
+			Logger.WriteLine(decks.Count + " possible decks found.", "IncorrectDeckMessage");
+			if (decks.Count > 0)
+                {
+				var dsDialog = new DeckSelectionDialog(decks);
+
+				//todo: System.Windows.Data Error: 2 : Cannot find governing FrameworkElement or FrameworkContentElement for target element. BindingExpression:Path=ClassColor; DataItem=null; target element is 'GradientStop' (HashCode=7260326); target property is 'Color' (type 'Color')
+				//when opened for seconds time. why?
+				dsDialog.ShowDialog();
+
+                
+				var selectedDeck = dsDialog.SelectedDeck;
+
+				if (selectedDeck != null)
+        {
+					Logger.WriteLine("Selected deck: " + selectedDeck.Name);
+					DeckPickerList.SelectDeck(selectedDeck);
+					UpdateDeckList(selectedDeck);
+					UseDeck(selectedDeck);
+            }
+				else
+            {
+					Logger.WriteLine("No deck selected. disabled deck detection.");
+					CheckboxDeckDetection.IsChecked = false;
+					SaveConfig(false);
+            }
+			}
+
+			IsShowingIncorrectDeckMessage = false;
+			NeedToIncorrectDeckMessage = false;
+                }
+
+		private void LoadConfig()
+        {
+			if (Config.Instance.StartMinimized)
+            {
+				WindowState = WindowState.Minimized;
+				if (Config.Instance.MinimizeToTray)
+					MinimizeToTray();
+            }
+			else
+			{
+				if (Config.Instance.TrackerWindowTop.HasValue)
+					Top = Config.Instance.TrackerWindowTop.Value;
+				if (Config.Instance.TrackerWindowLeft.HasValue)
+					Left = Config.Instance.TrackerWindowLeft.Value;
+        }
+
+			var theme = string.IsNullOrEmpty(Config.Instance.ThemeName)
+							? ThemeManager.DetectAppStyle().Item1
+							: ThemeManager.AppThemes.First(t => t.Name == Config.Instance.ThemeName);
+			var accent = string.IsNullOrEmpty(Config.Instance.AccentName)
+							 ? ThemeManager.DetectAppStyle().Item2
+							 : ThemeManager.Accents.First(a => a.Name == Config.Instance.AccentName);
+			ThemeManager.ChangeAppStyle(Application.Current, accent, theme);
+			ComboboxTheme.SelectedItem = theme;
+			ComboboxAccent.SelectedItem = accent;
+
+			CheckboxSaveAppData.IsChecked = Config.Instance.SaveInAppData;
+
+			Height = Config.Instance.WindowHeight;
+			Game.HighlightCardsInHand = Config.Instance.HighlightCardsInHand;
+			Game.HighlightDiscarded = Config.Instance.HighlightDiscarded;
+			CheckboxHideOverlayInBackground.IsChecked = Config.Instance.HideInBackground;
+			CheckboxHideDrawChances.IsChecked = Config.Instance.HideDrawChances;
+			CheckboxHideOpponentDrawChances.IsChecked = Config.Instance.HideOpponentDrawChances;
+			CheckboxHideOpponentCards.IsChecked = Config.Instance.HideOpponentCards;
+			CheckboxHideOpponentCardCounter.IsChecked = Config.Instance.HideOpponentCardCount;
+			CheckboxHideOpponentCardAge.IsChecked = Config.Instance.HideOpponentCardAge;
+			CheckboxHidePlayerCardCounter.IsChecked = Config.Instance.HidePlayerCardCount;
+			CheckboxHidePlayerCards.IsChecked = Config.Instance.HidePlayerCards;
+			CheckboxHideOverlayInMenu.IsChecked = Config.Instance.HideInMenu;
+			CheckboxHighlightCardsInHand.IsChecked = Config.Instance.HighlightCardsInHand;
+			CheckboxHideOverlay.IsChecked = Config.Instance.HideOverlay;
+			CheckboxHideDecksInOverlay.IsChecked = Config.Instance.HideDecksInOverlay;
+			CheckboxKeepDecksVisible.IsChecked = Config.Instance.KeepDecksVisible;
+			CheckboxMinimizeTray.IsChecked = Config.Instance.MinimizeToTray;
+			CheckboxWindowsTopmost.IsChecked = Config.Instance.WindowsTopmost;
+			CheckboxWindowsOpenAutomatically.IsChecked = Config.Instance.WindowsOnStartup;
+			CheckboxTimerTopmost.IsChecked = Config.Instance.TimerWindowTopmost;
+			CheckboxTimerWindow.IsChecked = Config.Instance.TimerWindowOnStartup;
+			CheckboxTimerTopmostHsForeground.IsChecked = Config.Instance.TimerWindowTopmostIfHsForeground;
+			CheckboxTimerTopmostHsForeground.IsEnabled = Config.Instance.TimerWindowTopmost;
+			CheckboxSameScaling.IsChecked = Config.Instance.UseSameScaling;
+			CheckboxDeckDetection.IsChecked = Config.Instance.AutoDeckDetection;
+			CheckboxWinTopmostHsForeground.IsChecked = Config.Instance.WindowsTopmostIfHsForeground;
+			CheckboxWinTopmostHsForeground.IsEnabled = Config.Instance.WindowsTopmost;
+			CheckboxAutoSelectDeck.IsEnabled = Config.Instance.AutoDeckDetection;
+			CheckboxAutoSelectDeck.IsChecked = Config.Instance.AutoSelectDetectedDeck;
+			CheckboxExportName.IsChecked = Config.Instance.ExportSetDeckName;
+			CheckboxPrioGolden.IsChecked = Config.Instance.PrioritizeGolden;
+			CheckboxBringHsToForegorund.IsChecked = Config.Instance.BringHsToForeground;
+			CheckboxFlashHs.IsChecked = Config.Instance.FlashHsOnTurnStart;
+			CheckboxHideSecrets.IsChecked = Config.Instance.HideSecrets;
+			CheckboxHighlightDiscarded.IsChecked = Config.Instance.HighlightDiscarded;
+			CheckboxRemoveCards.IsChecked = Config.Instance.RemoveCardsFromDeck;
+			CheckboxHighlightLastDrawn.IsChecked = Config.Instance.HighlightLastDrawn;
+			CheckboxStartMinimized.IsChecked = Config.Instance.StartMinimized;
+			CheckboxShowPlayerGet.IsChecked = Config.Instance.ShowPlayerGet;
+			ToggleSwitchExtraFeatures.IsChecked = Config.Instance.ExtraFeatures;
+
+			SliderOverlayOpacity.Value = Config.Instance.OverlayOpacity;
+			SliderOpponentOpacity.Value = Config.Instance.OpponentOpacity;
+			SliderPlayerOpacity.Value = Config.Instance.PlayerOpacity;
+			SliderOverlayPlayerScaling.Value = Config.Instance.OverlayPlayerScaling;
+			SliderOverlayOpponentScaling.Value = Config.Instance.OverlayOpponentScaling;
+
+			DeckPickerList.ShowAll = Config.Instance.ShowAllDecks;
+			DeckPickerList.SetSelectedTags(Config.Instance.SelectedTags);
+
+			CheckboxHideTimers.IsChecked = Config.Instance.HideTimers;
+			SliderTimersHorizontalSpacing.Value = Config.Instance.TimersHorizontalSpacing;
+			SliderTimersVerticalSpacing.Value = Config.Instance.TimersVerticalSpacing;
+
+                
+			SortFilterDecksFlyout.LoadTags(DeckList.AllTags);
+
+			SortFilterDecksFlyout.SetSelectedTags(Config.Instance.SelectedTags);
+			DeckPickerList.SetSelectedTags(Config.Instance.SelectedTags);
+
+			var tags = new List<string>(DeckList.AllTags);
+			tags.Remove("All");
+			TagControlNewDeck.LoadTags(tags);
+			TagControlMyDecks.LoadTags(tags);
+			DeckPickerList.SetTagOperation(Config.Instance.TagOperation);
+			SortFilterDecksFlyout.OperationSwitch.IsChecked = Config.Instance.TagOperation == Operation.And;
+
+			SortFilterDecksFlyout.ComboboxDeckSorting.SelectedItem = Config.Instance.SelectedDeckSorting;
+
+			ComboboxWindowBackground.SelectedItem = Config.Instance.SelectedWindowBackground;
+			TextboxCustomBackground.IsEnabled = Config.Instance.SelectedWindowBackground == "Custom";
+			TextboxCustomBackground.Text = string.IsNullOrEmpty(Config.Instance.WindowsBackgroundHex)
+											   ? "#696969"
+											   : Config.Instance.WindowsBackgroundHex;
+			UpdateAdditionalWindowsBackground();
+
+			ComboboxTextLocationPlayer.SelectedIndex = Config.Instance.TextOnTopPlayer ? 0 : 1;
+			ComboboxTextLocationOpponent.SelectedIndex = Config.Instance.TextOnTopOpponent ? 0 : 1;
+			Overlay.SetOpponentTextLocation(Config.Instance.TextOnTopOpponent);
+			OpponentWindow.SetTextLocation(Config.Instance.TextOnTopOpponent);
+			Overlay.SetPlayerTextLocation(Config.Instance.TextOnTopPlayer);
+			PlayerWindow.SetTextLocation(Config.Instance.TextOnTopPlayer);
+
+			if (Helper.LanguageDict.Values.Contains(Config.Instance.SelectedLanguage))
+        {
+				ComboboxLanguages.SelectedItem = Helper.LanguageDict.First(x => x.Value == Config.Instance.SelectedLanguage).Key;
+        }
+
+			if (!EventKeys.Contains(Config.Instance.KeyPressOnGameStart))
+        {
+				Config.Instance.KeyPressOnGameStart = "None";
+        }
+			ComboboxKeyPressGameStart.SelectedValue = Config.Instance.KeyPressOnGameStart;
+
+			if (!EventKeys.Contains(Config.Instance.KeyPressOnGameEnd))
+        {
+				Config.Instance.KeyPressOnGameEnd = "None";
+        }
+			ComboboxKeyPressGameEnd.SelectedValue = Config.Instance.KeyPressOnGameEnd;
+
+			CheckboxHideManaCurveMyDecks.IsChecked = Config.Instance.ManaCurveMyDecks;
+			ManaCurveMyDecks.Visibility = Config.Instance.ManaCurveMyDecks ? Visibility.Visible : Visibility.Collapsed;
+			CheckboxHideManaCurveNewDeck.IsChecked = Config.Instance.ManaCurveNewDeck;
+			ManaCurveNewDeck.Visibility = Config.Instance.ManaCurveNewDeck ? Visibility.Visible : Visibility.Collapsed;
+
+			CheckboxTrackerCardToolTips.IsChecked = Config.Instance.TrackerCardToolTips;
+			CheckboxWindowCardToolTips.IsChecked = Config.Instance.WindowCardToolTips;
+			CheckboxOverlayCardToolTips.IsChecked = Config.Instance.OverlayCardToolTips;
+			CheckboxOverlayAdditionalCardToolTips.IsEnabled = Config.Instance.OverlayCardToolTips;
+			CheckboxOverlayAdditionalCardToolTips.IsChecked = Config.Instance.AdditionalOverlayTooltips;
+
+			CheckboxLogGames.IsChecked = Config.Instance.SavePlayedGames;
+			TextboxLogGamesPath.IsEnabled = Config.Instance.SavePlayedGames;
+			BtnLogGamesSelectDir.IsEnabled = Config.Instance.SavePlayedGames;
+			TextboxLogGamesPath.Text = Config.Instance.SavePlayedGamesPath;
+
+			if (Config.Instance.SavePlayedGames && TextboxLogGamesPath.Text.Length == 0)
+				TextboxLogGamesPath.BorderBrush = new SolidColorBrush(Colors.Red);
+
+			CheckboxDeckSortingClassFirst.IsChecked = Config.Instance.CardSortingClassFirst;
+        }
+
+		private async void UpdateOverlayAsync()
+        {
+			var hsForegroundChanged = false;
+			while (_doUpdate)
+        {
+				if (Process.GetProcessesByName("Hearthstone").Length == 1)
+				{
+					Overlay.UpdatePosition();
             
-
-
-            //log reader
-            _logReader = new HsLogReader(_config.HearthstoneDirectory, _config.UpdateDelay);
-            _logReader.CardMovement += LogReaderOnCardMovement;
-            _logReader.GameStateChange += LogReaderOnGameStateChange;
-            _logReader.Analyzing += LogReaderOnAnalyzing;
-            _logReader.TurnStart += LogReaderOnTurnStart;
-
-            _turnTimer = new TurnTimer(90);
-            _turnTimer.TimerTick += TurnTimerOnTimerTick;
-
-            TagControlFilter.HideStuffToCreateNewTag();
-            TagControlSet.NewTag += TagControlSetOnNewTag;
-            TagControlSet.SelectedTagsChanged += TagControlSetOnSelectedTagsChanged;
-            TagControlSet.DeleteTag += TagControlSetOnDeleteTag;
-            TagControlFilter.SelectedTagsChanged += TagControlFilterOnSelectedTagsChanged;
-
-
-            UpdateDbListView();
-
-            _doUpdate = true;
-            UpdateOverlayAsync();
-
-
-            //ListboxDecks.SelectedItem =
-            //    _deckList.DecksList.FirstOrDefault(d => d.Name != null && d.Name == _config.LastDeck);
-
-            _initialized = true;
-
-            DeckPickerList.UpdateList();
-            if (lastDeck != null)
+					if (!User32.IsForegroundWindow("Hearthstone") && !hsForegroundChanged)
             {
-                DeckPickerList.SelectDeck(lastDeck);
-                UpdateDeckList(lastDeck);
-                UseDeck(lastDeck);
+						if (Config.Instance.WindowsTopmostIfHsForeground && Config.Instance.WindowsTopmost)
+						{
+							PlayerWindow.Topmost = false;
+							OpponentWindow.Topmost = false;
+							TimerWindow.Topmost = false;
+            }
+						hsForegroundChanged = true;
+        }
+					else if (hsForegroundChanged && User32.IsForegroundWindow("Hearthstone"))
+        {
+						Overlay.Update(true);
+						if (Config.Instance.WindowsTopmostIfHsForeground && Config.Instance.WindowsTopmost)
+        {
+							//if player topmost is set to true before opponent:
+							//clicking on the playerwindow and back to hs causes the playerwindow to be behind hs.
+							//other way around it works for both windows... what?
+							OpponentWindow.Topmost = true;
+							PlayerWindow.Topmost = true;
+							TimerWindow.Topmost = true;
+        }
+						hsForegroundChanged = false;
+        }
+        }
+				else
+        {
+					Overlay.ShowOverlay(false);
+        }
+				await Task.Delay(Config.Instance.UpdateDelay);
+        }
+        }
+
+		private async void ShowNewUpdateMessage()
+        {
+			const string releaseDownloadUrl = @"https://github.com/Epix37/Hearthstone-Deck-Tracker/releases";
+			var settings = new MetroDialogSettings { AffirmativeButtonText = "Download", NegativeButtonText = "Not now" };
+
+			var result =
+				await
+				this.ShowMessageAsync("New Update available!",
+									  "Download version " + string.Format("{0}.{1}.{2}", NewVersion.Major, NewVersion.Minor,
+																		  NewVersion.Build) + " at\n" + releaseDownloadUrl,
+									  MessageDialogStyle.AffirmativeAndNegative, settings);
+
+			if (result == MessageDialogResult.Affirmative)
+        {
+				Process.Start(releaseDownloadUrl);
+            }
             }
 
-
-            _logReader.Start();
-
+		public async void ShowMessage(string title, string message)
+        {
+			await this.ShowMessageAsync(title, message);
         }
 
-        #region LogReader Events
-
-        private void TurnTimerOnTimerTick(TurnTimer sender, TimerEventArgs timerEventArgs)
+		private async void ShowHsNotInstalledMessage()
         {
-            _overlay.Dispatcher.BeginInvoke(new Action(() => _overlay.UpdateTurnTimer(timerEventArgs)));
-        }
-
-        private void LogReaderOnTurnStart(HsLogReader sender, TurnStartArgs args)
+			var settings = new MetroDialogSettings { AffirmativeButtonText = "Ok", NegativeButtonText = "Select manually" };
+			var result =
+				await
+				this.ShowMessageAsync("Hearthstone install directory not found",
+									  "Hearthstone Deck Tracker will not work properly if Hearthstone is not installed on your machine (obviously).",
+									  MessageDialogStyle.AffirmativeAndNegative, settings);
+			if (result == MessageDialogResult.Negative)
         {
-            //doesn't really matter whose turn it is for now, just restart timer
-            //maybe add timer to player/opponent windows
-            _turnTimer.SetCurrentPlayer(args.Turn);
-            _turnTimer.Restart();
-        }
-
-        private void LogReaderOnAnalyzing(HsLogReader sender, AnalyzingArgs args)
+				var dialog = new OpenFileDialog
         {
-            if (args.State == AnalyzingState.Start)
+						Title = "Select Hearthstone.exe",
+						DefaultExt = "Hearthstone.exe",
+						Filter = "Hearthstone.exe|Hearthstone.exe"
+					};
+				var dialogResult = dialog.ShowDialog();
+
+				if (dialogResult == true)
             {
-
-            }
-            else if (args.State == AnalyzingState.End)
-            {
-                //reader done analyzing new stuff, update things
-                if (_overlay.IsVisible)
-                    _overlay.Update(false);
-
-                if (_playerWindow.IsVisible)
-                    _playerWindow.SetCardCount(_hearthstone.PlayerHandCount,
-                                               30 - _hearthstone.PlayerDrawn.Sum(card => card.Count));
-
-                if (_opponentWindow.IsVisible)
-                    _opponentWindow.SetOpponentCardCount(_hearthstone.EnemyHandCount,
-                                                         _hearthstone.OpponentDeckCount, _hearthstone.OpponentHasCoin);
-
-
-                if (_showIncorrectDeckMessage && !_showingIncorrectDeckMessage)
-                {
-                    _showingIncorrectDeckMessage = true;
-
-                    ShowIncorrectDeckMessage();
-                    //stuff
+					Config.Instance.HearthstoneDirectory = Path.GetDirectoryName(dialog.FileName);
+					Config.Save();
+					await Restart();
                 }
-                
-            }
-        }
-
-        private void LogReaderOnGameStateChange(HsLogReader sender, GameStateArgs args)
-        {
-            if (!string.IsNullOrEmpty(args.PlayerHero))
-            {
-                _hearthstone.PlayingAs = args.PlayerHero;
-
-            }
-            if (!string.IsNullOrEmpty(args.OpponentHero))
-            {
-                _hearthstone.PlayingAgainst = args.OpponentHero;
-            }
-
-            if (args.State != null)
-            {
-                switch (args.State)
-                {
-                    case GameState.GameBegin:
-                        HandleGameStart();
-                        break;
-                    case GameState.GameEnd:
-                        HandleGameEnd();
-                        break;
                 }
             }
+
+		private async Task Restart()
+        {
+			await this.ShowMessageAsync("Restarting tracker", "");
+			Process.Start(Application.ResourceAssembly.Location);
+			Application.Current.Shutdown();
         }
 
-        private void LogReaderOnCardMovement(HsLogReader sender, CardMovementArgs args)
+		public void WriteDecks()
         {
-            switch (args.MovementType)
-            {
-                case CardMovementType.PlayerGet:
-                    HandlePlayerGet(args.CardId);
-                    break;
-                case CardMovementType.PlayerDraw:
-                    HandlePlayerDraw(args.CardId);
-                    break;
-                case CardMovementType.PlayerMulligan:
-                    HandlePlayerMulligan(args.CardId);
-                    break;
-                case CardMovementType.PlayerHandDiscard:
-                    HandlePlayerHandDiscard(args.CardId);
-                    break;
-                case CardMovementType.PlayerPlay:
-                    HandlePlayerPlay(args.CardId);
-                    break;
-                case CardMovementType.PlayerDeckDiscard:
-                    HandlePlayerDeckDiscard(args.CardId);
-                    break;
-                case CardMovementType.OpponentSecretTrigger:
-                    HandleOpponentSecretTrigger(args.CardId);
-                    break;
-                case CardMovementType.OpponentPlay:
-                    HandleOpponentPlay(args.CardId);
-                    break;
-                case CardMovementType.OpponentMulligan:
-                    HandleOpponentMulligan();
-                    break;
-                case CardMovementType.OpponentHandDiscard:
-                    HandleOpponentHandDiscard();
-                    break;
-                case CardMovementType.OpponentDraw:
-                    HandleOpponentDraw();
-                    break;
-                case CardMovementType.OpponentDeckDiscard:
-                    HandleOpponentDeckDiscard(args.CardId);
-                    break;
-                case CardMovementType.OpponentPlayToHand:
-                    HandleOpponentPlayToHand(args.CardId);
-                    break;
-                case CardMovementType.OpponentGet:
-                    HandleOpponentGet(args.CardId);
-                    break;
-                default:
-                    Console.WriteLine("Invalid card movement");
-                    break;
-            }
+			XmlManager<Decks>.Save(_decksPath, DeckList);
         }
 
-        #endregion
-
-        #region Handle Events
-
-        private void HandleGameStart()
+		public void SavePlayedCards()
         {
-            //avoid new game being started when jaraxxus is played
-            if (!_hearthstone.IsInMenu) return;
-
-
-            var selectedDeck = DeckPickerList.SelectedDeck;
-            if (selectedDeck != null)
-                _hearthstone.SetPremadeDeck(selectedDeck.Cards);
-
-            _hearthstone.IsInMenu = false;
-            _hearthstone.Reset();
-
-            //select deck based on hero
-            if (!string.IsNullOrEmpty(_hearthstone.PlayingAs))
+			try
             {
-                if (!_hearthstone.IsUsingPremade) return;
-                
-                if (selectedDeck == null || selectedDeck.Class != _hearthstone.PlayingAs)
+				if (Game.PlayerDrawn != null && Game.PlayerDrawn.Count > 0)
                 {
+					var serializer = new XmlSerializer(typeof(Card[]));
 
-                    var classDecks = _deckList.DecksList.Where(d => d.Class == _hearthstone.PlayingAs).ToList();
-                    if (classDecks.Count == 0)
-                    {
-                        Debug.WriteLine("Found no deck to switch to", "HandleGameStart");
-                        return;
-                    }
-                    if (classDecks.Count == 1)
-                    {
-                        DeckPickerList.SelectDeck(classDecks[0]);
-                        Debug.WriteLine("Found deck to switch to: " + classDecks[0].Name, "HandleGameStart");
-                    }
-                    else if (_deckList.LastDeckClass.Any(ldc => ldc.Class == _hearthstone.PlayingAs))
-                    {
-                        var lastDeckName = _deckList.LastDeckClass.First(ldc => ldc.Class == _hearthstone.PlayingAs).Name;
-                        Debug.WriteLine("Found more than 1 deck to switch to - last played: " + lastDeckName, "HandleGameStart");
+					if (string.IsNullOrEmpty(Config.Instance.SavePlayedGamesPath))
+						return;
 
-                        var deck = _deckList.DecksList.FirstOrDefault(d => d.Name == lastDeckName);
-
-                        if (deck != null)
-                        {
-                            DeckPickerList.SelectDeck(deck);
-                            UpdateDeckList(deck);
-                            UseDeck(deck);
+					Directory.CreateDirectory(Config.Instance.SavePlayedGamesPath);
+					var path = Config.Instance.SavePlayedGamesPath + "\\" + DateTime.Now.ToString("ddMMyyyyHHmmss");
+					Directory.CreateDirectory(path);
+					Logger.WriteLine("Saving games to: " + path);
+					using (var sw = new StreamWriter(path + "\\Player.xml"))
+                    {
+						serializer.Serialize(sw, Game.PlayerDrawn.ToArray());
+						Logger.WriteLine("Success saving Player.xml");
+                        }
+					using (var sw = new StreamWriter(path + "\\Opponent.xml"))
+                    {
+						if (Game.OpponentCards != null)
+							serializer.Serialize(sw, Game.OpponentCards.ToArray());
+						Logger.WriteLine("Success saving Opponent.xml");
                         }
                     }
                 }
-            }
-        }
-
-        private void HandleGameEnd()
-        {
-            _turnTimer.Stop();
-            _overlay.HideTimers();
-            if (!_config.KeepDecksVisible)
-            {
-                var deck = DeckPickerList.SelectedDeck;
-                if (deck != null)
-                    _hearthstone.SetPremadeDeck(deck.Cards);
-
-                _hearthstone.Reset();
-            }
-            _hearthstone.IsInMenu = true;
-        }
-
-        private void HandleOpponentGet(string cardId)
-        {
-            _hearthstone.OpponentGet(cardId);
-        }
-
-        private void HandleOpponentPlayToHand(string cardId)
-        {
-            _hearthstone.OpponentBackToHand(cardId);
-        }
-
-        private void HandlePlayerGet(string cardId)
-        {
-            _hearthstone.PlayerGet(cardId);
-        }
-
-        private void HandlePlayerDraw(string cardId)
-        {
-           var correctDeck = _hearthstone.PlayerDraw(cardId);
-
-            if (!correctDeck && _config.AutoDeckDetection && !_showIncorrectDeckMessage && !_showingIncorrectDeckMessage && _hearthstone.IsUsingPremade)
-            {
-                _showIncorrectDeckMessage = true;
-                Debug.WriteLine("Found incorrect deck", "HandlePlayerDraw");
-            }
-        }
-
-
-        private void HandlePlayerMulligan(string cardId)
-        {
-Console.WriteLine("HandlePlayerMulligan");
-            _turnTimer.MulliganDone(Turn.Player);
-            _hearthstone.Mulligan(cardId);
-        }
-
-        private void HandlePlayerHandDiscard(string cardId)
-        {
-            _hearthstone.PlayerHandDiscard(cardId);
-        }
-
-        private void HandlePlayerPlay(string cardId)
-        {
-            _hearthstone.PlayerPlayed(cardId);
-        }
-
-        private void HandlePlayerDeckDiscard(string cardId)
-        {
-            var correctDeck = _hearthstone.PlayerDeckDiscard(cardId);
-            
-            //don't think this will ever detect an incorrect deck but who knows...
-            if (!correctDeck && _config.AutoDeckDetection && !_showIncorrectDeckMessage && !_showingIncorrectDeckMessage && _hearthstone.IsUsingPremade)
-            {
-                _showIncorrectDeckMessage = true;
-                Debug.WriteLine("Found incorrect deck", "HandlePlayerDiscard");
-            }
-        }
-
-        private void HandleOpponentSecretTrigger(string cardId)
-        {
-            _hearthstone.EnemySecretTriggered(cardId);
-        }
-
-        private void HandleOpponentPlay(string cardId)
-        {
-            _hearthstone.EnemyPlayed(cardId);
-        }
-
-        private void HandleOpponentMulligan()
-        {
-            _turnTimer.MulliganDone(Turn.Opponent);
-            _hearthstone.EnemyMulligan();
-        }
-
-        private void HandleOpponentHandDiscard()
-        {
-            _hearthstone.EnemyHandDiscard();
-        }
-
-        private void HandleOpponentDraw()
-        {
-            _hearthstone.EnemyDraw();
-        }
-
-        private void HandleOpponentDeckDiscard(string cardId)
-        {
-            _hearthstone.EnemyDeckDiscard(cardId);
-        }
-
-        #endregion
-
-        #region GENERAL GUI
-
-        private void MetroWindow_Activated(object sender, EventArgs e)
-        {
-            Topmost = true;
-        }
-
-        private void MetroWindow_Deactivated(object sender, EventArgs e)
-        {
-            Topmost = false;
-        }
-
-        private void MetroWindow_StateChanged(object sender, EventArgs e)
-        {
-            if (!_config.MinimizeToTray) return;
-            if (WindowState == WindowState.Minimized)
-            {
-                _notifyIcon.Visible = true;
-                _notifyIcon.ShowBalloonTip(2000, "Hearthstone Deck Tracker", "Minimized to tray",
-                                           System.Windows.Forms.ToolTipIcon.Info);
-                Hide();
-            }
-        }
-
-        private void Window_Closing_1(object sender, CancelEventArgs e)
-        {
-            try
-            {
-                _doUpdate = false;
-                _config.SelectedTags = _config.SelectedTags.Distinct().ToList();
-                _config.ShowAllDecks = DeckPickerList.ShowAll;
-                _config.WindowHeight = (int)Height;
-                _overlay.Close();
-                _logReader.Stop();
-                _playerWindow.Shutdown();
-                _opponentWindow.Shutdown();
-                _xmlManagerConfig.Save("config.xml", _config);
-                _xmlManager.Save("PlayerDecks.xml", _deckList);
-            }
-            catch (Exception)
-            {
-                //doesnt matter
-            }
-        }
-
-        private void NotifyIconOnMouseDoubleClick(object sender, System.Windows.Forms.MouseEventArgs mouseEventArgs)
-        {
-            _notifyIcon.Visible = false;
-            Show();
-            WindowState = WindowState.Normal;
-            Activate();
-        }
-
-        private void BtnFilterTag_Click(object sender, RoutedEventArgs e)
-        {
-            FlyoutFilterTags.IsOpen = !FlyoutFilterTags.IsOpen;
-        }
-
-        private void TagControlFilterOnSelectedTagsChanged(TagControl sender, List<string> tags)
-        {
-            DeckPickerList.SetSelectedTags(tags);
-            _config.SelectedTags = tags;
-            _xmlManagerConfig.Save("config.xml", _config);
-        }
-
-        private void MetroWindow_Loaded(object sender, RoutedEventArgs e)
-        {
-            if (_newVersion != null)
-            {
-                ShowNewUpdateMessage();
-            }
-        }
-        
-        #endregion
-
-        #region GENERAL METHODS
-
-        private void ShowIncorrectDeckMessage()
-        {
-
-            var decks =
-                _deckList.DecksList.Where(
-                    d => d.Class == _hearthstone.PlayingAs && _hearthstone.PlayerDrawn.All(c => d.Cards.Contains(c)))
-                         .ToList();
-            if (decks.Contains(DeckPickerList.SelectedDeck))
-                decks.Remove(DeckPickerList.SelectedDeck);
-
-            Debug.WriteLine(decks.Count + " possible decks found.", "IncorrectDeckMessage");
-            if (decks.Count > 0)
-            {
-
-                DeckSelectionDialog dsDialog = new DeckSelectionDialog(decks);
-
-                //todo: System.Windows.Data Error: 2 : Cannot find governing FrameworkElement or FrameworkContentElement for target element. BindingExpression:Path=ClassColor; DataItem=null; target element is 'GradientStop' (HashCode=7260326); target property is 'Color' (type 'Color')
-                //when opened for seconds time. why?
-                dsDialog.ShowDialog();
-                
-                    
-
-                var selectedDeck = dsDialog.SelectedDeck;
-
-                if (selectedDeck != null)
+			catch (Exception e)
                 {
-                    Debug.WriteLine("Selected deck: " + selectedDeck.Name);
-                    DeckPickerList.SelectDeck(selectedDeck);
-                    UpdateDeckList(selectedDeck);
-                    UseDeck(selectedDeck);
-                }
-                else
-                {
-                    Debug.WriteLine("No deck selected. disabled deck detection.");
-                    CheckboxDeckDetection.IsChecked = false;
-                    SaveConfig(false);
+				Logger.WriteLine("Error saving game\n" + e.StackTrace);
                 }
             }
-
-            _showingIncorrectDeckMessage = false;
-            _showIncorrectDeckMessage = false;
-        }
-
-        private void LoadConfig()
-        {
-            //var deck = _deckList.DecksList.FirstOrDefault(d => d.Name == _config.LastDeck);
-            //if (deck != null && ListboxDecks.Items.Contains(deck))
-            //{
-            //    ListboxDecks.SelectedItem = deck;
-            //}
-
-            Height = _config.WindowHeight;
-            Hearthstone.HighlightCardsInHand = _config.HighlightCardsInHand;
-            CheckboxHideOverlayInBackground.IsChecked = _config.HideInBackground;
-            CheckboxHideDrawChances.IsChecked = _config.HideDrawChances;
-            CheckboxHideOpponentDrawChances.IsChecked = _config.HideOpponentDrawChances;
-            CheckboxHideEnemyCards.IsChecked = _config.HideEnemyCards;
-            CheckboxHideEnemyCardCounter.IsChecked = _config.HideEnemyCardCount;
-            CheckboxHidePlayerCardCounter.IsChecked = _config.HidePlayerCardCount;
-            CheckboxHideOverlayInMenu.IsChecked = _config.HideInMenu;
-            CheckboxHighlightCardsInHand.IsChecked = _config.HighlightCardsInHand;
-            CheckboxHideOverlay.IsChecked = _config.HideOverlay;
-            CheckboxKeepDecksVisible.IsChecked = _config.KeepDecksVisible;
-            CheckboxMinimizeTray.IsChecked = _config.MinimizeToTray;
-            CheckboxWindowsTopmost.IsChecked = _config.WindowsTopmost;
-            CheckboxWindowsOpenAutomatically.IsChecked = _config.WindowsOnStartup;
-            CheckboxSameScaling.IsChecked = _config.UseSameScaling;
-            CheckboxDeckDetection.IsChecked = _config.AutoDeckDetection;
-            CheckboxWinTopmostHsForeground.IsChecked = _config.WindowsTopmostIfHsForeground;
-            CheckboxWinTopmostHsForeground.IsEnabled = _config.WindowsTopmost;
-            CheckboxAutoSelectDeck.IsEnabled = _config.AutoDeckDetection;
-            CheckboxAutoSelectDeck.IsChecked = _config.AutoSelectDetectedDeck;
-
-            RangeSliderPlayer.UpperValue = 100 - _config.PlayerDeckTop;
-            RangeSliderPlayer.LowerValue = (100 - _config.PlayerDeckTop) - _config.PlayerDeckHeight;
-            SliderPlayer.Value = _config.PlayerDeckLeft;
-
-            RangeSliderOpponent.UpperValue = 100 - _config.OpponentDeckTop;
-            RangeSliderOpponent.LowerValue = (100 - _config.OpponentDeckTop) - _config.OpponentDeckHeight;
-            SliderOpponent.Value = _config.OpponentDeckLeft;
-
-            SliderOverlayOpacity.Value = _config.OverlayOpacity;
-            SliderOverlayPlayerScaling.Value = _config.OverlayPlayerScaling;
-            SliderOverlayOpponentScaling.Value = _config.OverlayOpponentScaling;
-
-            DeckPickerList.ShowAll = _config.ShowAllDecks;
-            DeckPickerList.SetSelectedTags(_config.SelectedTags);
-
-            CheckboxHideTimers.IsChecked = _config.HideTimers;
-            SliderTimersHorizontal.Value = _config.TimersHorizontalPosition;
-            SliderTimersHorizontalSpacing.Value = _config.TimersHorizontalSpacing;
-            SliderTimersVertical.Value = _config.TimersVerticalPosition;
-            SliderTimersVerticalSpacing.Value = _config.TimersVerticalSpacing;
-
-            TagControlFilter.LoadTags(_deckList.AllTags);
-
-            TagControlFilter.SetSelectedTags(_config.SelectedTags);
-            DeckPickerList.SetSelectedTags(_config.SelectedTags);
-
-            var tags = new List<string>(_deckList.AllTags);
-            tags.Remove("All");
-            TagControlSet.LoadTags(tags);
-
-        }
-
-        private void SortCardCollection(ItemCollection collection)
-        {
-            var view1 = (CollectionView) CollectionViewSource.GetDefaultView(collection);
-            view1.SortDescriptions.Add(new SortDescription("Cost", ListSortDirection.Ascending));
-            view1.SortDescriptions.Add(new SortDescription("Type", ListSortDirection.Descending));
-            view1.SortDescriptions.Add(new SortDescription("Name", ListSortDirection.Ascending));
-        }
-
-        private async void UpdateOverlayAsync()
-        {
-            bool hsForegroundChanged = false;
-            while (_doUpdate)
-            {
-                if (Process.GetProcessesByName("Hearthstone").Length == 1)
-                {
-                    _overlay.UpdatePosition();
-
-                    if (!User32.IsForegroundWindow("Hearthstone") && !hsForegroundChanged)
-                    {
-                        if(_config.WindowsTopmostIfHsForeground && _config.WindowsTopmost)
-                        {
-                            _playerWindow.Topmost = false;
-                            _opponentWindow.Topmost = false;
-                        }
-                        hsForegroundChanged = true;
-
-                    }
-                    else if (hsForegroundChanged && User32.IsForegroundWindow("Hearthstone"))
-                    {
-                        _overlay.Update(true);
-                        if (_config.WindowsTopmostIfHsForeground && _config.WindowsTopmost)
-                        {
-                            _playerWindow.Topmost = true;
-                            _opponentWindow.Topmost = true;
-                        }
-                        hsForegroundChanged = false;
-                    }
-                }
-                else
-                {
-                    _overlay.ShowOverlay(false);
-                }
-                await Task.Delay(_config.UpdateDelay);
-            }
-        }
         
         private async void ShowNewUpdateMessage()
         {
@@ -807,29 +561,44 @@ Console.WriteLine("HandlePlayerMulligan");
 
         private void ButtonNoDeck_Click(object sender, RoutedEventArgs e)
         {
-            Debug.WriteLine("set player item source as drawn");
-            _overlay.ListViewPlayer.ItemsSource = _hearthstone.PlayerDrawn;
+			Logger.WriteLine("set player item source as drawn");
+			Overlay.ListViewPlayer.ItemsSource = Game.PlayerDrawn;
+			PlayerWindow.ListViewPlayer.ItemsSource = Game.PlayerDrawn;
+			Game.IsUsingPremade = false;
+
+			if (DeckPickerList.SelectedDeck != null)
+				DeckPickerList.SelectedDeck.IsSelectedInGui = false;
+
             DeckPickerList.SelectedDeck = null;
             DeckPickerList.SelectedIndex = -1;
+			DeckPickerList.ListboxPicker.Items.Refresh();
+
             UpdateDeckList(null);
             UseDeck(null);
-            _hearthstone.IsUsingPremade = false;
+			EnableDeckButtons(false);
+			ManaCurveMyDecks.ClearDeck();
         }
 
-        private async void BtnEditDeck_Click(object sender, RoutedEventArgs e)
+		public void EnableDeckButtons(bool enable)
         {
-            //if (ListboxDecks.SelectedIndex == -1) return;
-            //var selectedDeck = ListboxDecks.SelectedItem as Deck;
+			DeckOptionsFlyout.EnableButtons(enable);
+			BtnEditDeck.IsEnabled = enable;
+			BtnDeckOptions.IsEnabled = enable;
+		}
+
+		private async void BtnEditDeck_Click(object sender, RoutedEventArgs e)
+		{
             var selectedDeck = DeckPickerList.SelectedDeck;
             if (selectedDeck == null) return;
-            //move to new deck section with stuff preloaded
+
             if (_newContainsDeck)
             {
-                var settings = new MetroDialogSettings();
-                settings.AffirmativeButtonText = "Yes";
-                settings.NegativeButtonText = "No";
-                var result = await this.ShowMessageAsync("Found unfinished deck", "New Deck Section still contains an unfinished deck. Discard?", MessageDialogStyle.AffirmativeAndNegative, settings);
-                if (result == MessageDialogResult.Negative)
+				var settings = new MetroDialogSettings { AffirmativeButtonText = "Yes", NegativeButtonText = "No" };
+				var result =
+					await
+					this.ShowMessageAsync("Found unfinished deck", "New Deck Section still contains an unfinished deck. Discard?",
+										  MessageDialogStyle.AffirmativeAndNegative, settings);
+				if (result == MessageDialogResult.Negative)
                 {
                     TabControlTracker.SelectedIndex = 1;
                     return;
@@ -837,203 +606,143 @@ Console.WriteLine("HandlePlayerMulligan");
             }
 
             ClearNewDeckSection();
-            _editingDeck = true;
+			EditingDeck = true;
             _newContainsDeck = true;
-            _newDeck = (Deck) selectedDeck.Clone();
-            ListViewNewDeck.ItemsSource = _newDeck.Cards;
+			NewDeck = (Deck)selectedDeck.Clone();
+			ListViewNewDeck.ItemsSource = NewDeck.Cards;
 
-            if (ComboBoxSelectClass.Items.Contains(_newDeck.Class))
-                ComboBoxSelectClass.SelectedValue = _newDeck.Class;
+			if (ComboBoxSelectClass.Items.Contains(NewDeck.Class))
+				ComboBoxSelectClass.SelectedValue = NewDeck.Class;
 
-            TextBoxDeckName.Text = _newDeck.Name;
+			TextBoxDeckName.Text = NewDeck.Name;
             UpdateNewDeckHeader(true);
             UpdateDbListView();
 
-            TagControlSet.SetSelectedTags(_newDeck.Tags);
+
+			TagControlNewDeck.SetSelectedTags(NewDeck.Tags);
 
             TabControlTracker.SelectedIndex = 1;
         }
 
-        private async void BtnDeleteDeck_Click(object sender, RoutedEventArgs e)
-        {
-            //var deck = ListboxDecks.SelectedItem as Deck;
-            var deck = DeckPickerList.SelectedDeck;
-            if (deck != null)
-            {
-                var settings = new MetroDialogSettings();
-                settings.AffirmativeButtonText = "Yes";
-                settings.NegativeButtonText = "No";
-                var result = await this.ShowMessageAsync("Deleting " + deck.Name, "Are you Sure?", MessageDialogStyle.AffirmativeAndNegative, settings);
-                if (result == MessageDialogResult.Affirmative)
-                {
-                    try
-                    {
-                        _deckList.DecksList.Remove(deck);
-                        _xmlManager.Save("PlayerDecks.xml", _deckList);
-                        DeckPickerList.RemoveDeck(deck);
-                        ListViewDeck.Items.Clear();
-                    }
-                    catch (Exception)
-                    {
-                        Debug.WriteLine("Error deleting deck");
-                    }
-                }
-            }
-        }
-        
-        private async void BtnExport_Click(object sender, RoutedEventArgs e)
-        {
-            var deck = DeckPickerList.SelectedDeck;
-            if (deck == null) return;
-
-            var result = await this.ShowMessageAsync("Export " + deck.Name + " to Hearthstone",
-                                               "Please create a new, empty " + deck.Class + "-Deck in Hearthstone before continuing (leave the deck creation screen open).\nDo not move your mouse after clicking OK!",
-                                               MessageDialogStyle.AffirmativeAndNegative);
-
-            if (result == MessageDialogResult.Affirmative)
-            {
-                var controller = await this.ShowProgressAsync("Creating Deck", "Please do not move your mouse or type.");
-                Topmost = false;
-                await Task.Delay(500);
-                await _deckExporter.Export(DeckPickerList.SelectedDeck);
-                await controller.CloseAsync();
-            }
-
-
-        }
         private void BtnSetTag_Click(object sender, RoutedEventArgs e)
         {
-            FlyoutSetTags.IsOpen = !FlyoutSetTags.IsOpen;
+			FlyoutNewDeckSetTags.IsOpen = !FlyoutNewDeckSetTags.IsOpen;
         }
 
-        private void TagControlSetOnNewTag(TagControl sender, string tag)
+		public async Task ShowSavedFileMessage(string fileName, string dir)
         {
-            if (!_deckList.AllTags.Contains(tag))
+			var settings = new MetroDialogSettings { NegativeButtonText = "Open folder" };
+			var result =
+				await
+				this.ShowMessageAsync("", "Saved to\n\"" + fileName + "\"", MessageDialogStyle.AffirmativeAndNegative, settings);
+			if (result == MessageDialogResult.Negative)
             {
-                _deckList.AllTags.Add(tag);
-                _xmlManager.Save("PlayerDecks.xml", _deckList);
-                TagControlFilter.LoadTags(_deckList.AllTags);
-            }
-        }
-        private void TagControlSetOnDeleteTag(TagControl sender, string tag)
-        {
-            if (_deckList.AllTags.Contains(tag))
-            {
-                _deckList.AllTags.Remove(tag);
-                foreach (var deck in _deckList.DecksList)
-                {
-                    if (deck.Tags.Contains(tag))
-                    {
-                        deck.Tags.Remove(tag);
-                    }
-                }
-                if (_newDeck.Tags.Contains(tag))
-                    _newDeck.Tags.Remove(tag);
-
-                _xmlManager.Save("PlayerDecks.xml", _deckList);
-                TagControlFilter.LoadTags(_deckList.AllTags);
-                DeckPickerList.UpdateList();
+				Process.Start(Path.GetDirectoryName(Application.ResourceAssembly.Location) + "\\" + dir);
             }
         }
 
-        private void TagControlSetOnSelectedTagsChanged(TagControl sender, List<string> tags)
+
+
+		private void BtnDeckOptions_Click(object sender, RoutedEventArgs e)
         {
-            if (_newDeck == null) return;
-            _newDeck.Tags = new List<string>(tags);
-            BtnSaveDeck.Content = "Save*";
+			FlyoutDeckOptions.IsOpen = true;
         }
 
-        private void BtnNotes_Click(object sender, RoutedEventArgs e)
-        {
-            FlyoutNotes.IsOpen = !FlyoutNotes.IsOpen;
-        }
         #endregion
 
         #region MY DECKS - METHODS
 
-        private void UseDeck(Deck selected)
+		public void UseDeck(Deck selected)
         {
-            if (selected == null)
-                return;
-            _hearthstone.Reset();
+			if (!Game.IsInMenu)
+				Game.Reset();
 
-            _hearthstone.SetPremadeDeck(selected.Cards);
+			if (selected != null)
+				Game.SetPremadeDeck((Deck)selected.Clone());
 
-            _overlay.SortViews();
+			if (!Game.IsInMenu)
+			{
+				//needs to be true for automatic deck detection to work
+				HsLogReader.Instance.Reset(true);
+				Overlay.Update(false);
+			}
 
-            _logReader.Reset(false);
+			Overlay.SortViews();
         }
 
-        private void UpdateDeckList(Deck selected)
+		public void UpdateDeckList(Deck selected)
         {
-            ListViewDeck.Items.Clear();
+			ListViewDeck.ItemsSource = null;
             if (selected == null)
             {
-                _config.LastDeck = string.Empty;
-                _xmlManagerConfig.Save("config.xml", _config);
+				Config.Instance.LastDeck = string.Empty;
+				Config.Save();
                 return;
             }
-            foreach (var card in selected.Cards)
-            {
-                ListViewDeck.Items.Add(card);
+			ListViewDeck.ItemsSource = selected.Cards;
+
+			Helper.SortCardCollection(ListViewDeck.Items, Config.Instance.CardSortingClassFirst);
+			Config.Instance.LastDeck = selected.Name;
+			Config.Save();
             }
 
-            SortCardCollection(ListViewDeck.Items);
-            _config.LastDeck = selected.Name;
-            _xmlManagerConfig.Save("config.xml", _config);
-        }
+		#endregion
 
-        private void DeckPickerListOnSelectedDeckChanged(DeckPicker sender, Deck deck)
+		#region NEW DECK GUI
+
+		private void ComboBoxFilterClass_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (!_initialized) return;
-            if (deck != null)
+			NewDeck.Class = ComboBoxSelectClass.SelectedValue.ToString();
+			_newContainsDeck = true;
+			UpdateDbListView();
+
+			ManaCurveNewDeck.UpdateValues();
+		}
+
+		private async void BtnSaveDeck_Click(object sender, RoutedEventArgs e)
             {
-                //set up notes
-                DeckNotesEditor.SetDeck(deck);
-                FlyoutNotes.Header = deck.Name.Length >= 20 ? string.Join("", deck.Name.Take(17)) + "..." : deck.Name;
+			NewDeck.Cards = new ObservableCollection<Card>(NewDeck.Cards.OrderBy(c => c.Cost).ThenByDescending(c => c.Type).ThenBy(c => c.Name).ToList());
+			ListViewNewDeck.ItemsSource = NewDeck.Cards;
 
-                //change player deck itemsource
-                if (_overlay.ListViewPlayer.ItemsSource != _hearthstone.PlayerDeck)
+			var deckName = TextBoxDeckName.Text;
+			if (EditingDeck)
                 {
-                    _overlay.ListViewPlayer.ItemsSource = _hearthstone.PlayerDeck;
-                    Debug.WriteLine("Set player itemsource as playerdeck");
+				var settings = new MetroDialogSettings { AffirmativeButtonText = "Overwrite", NegativeButtonText = "Save as new" };
+				var result =
+					await
+					this.ShowMessageAsync("Saving deck", "How do you wish to save the deck?", MessageDialogStyle.AffirmativeAndNegative, settings);
+				if (result == MessageDialogResult.Affirmative)
+					SaveDeck(true);
+				else if (result == MessageDialogResult.Negative)
+					SaveDeck(false);
                 }
-                _hearthstone.IsUsingPremade = true;
-                UpdateDeckList(deck);
-                UseDeck(deck);
-
-                //set and save last used deck for class
-                if (_deckList.LastDeckClass.Any(ldc => ldc.Class == deck.Class))
+			else if (DeckList.DecksList.Any(d => d.Name == deckName))
                 {
-                    var lastSelected = _deckList.LastDeckClass.FirstOrDefault(ldc => ldc.Class == deck.Class);
-                    if (DeckPickerList.SelectedDeck != null)
+				var settings = new MetroDialogSettings { AffirmativeButtonText = "Overwrite", NegativeButtonText = "Set new name" };
+				var result =
+					await
+					this.ShowMessageAsync("A deck with that name already exists", "Overwriting the deck can not be undone!", MessageDialogStyle.AffirmativeAndNegative, settings);
+				if (result == MessageDialogResult.Affirmative)
                     {
-                        _deckList.LastDeckClass.Remove(lastSelected);
+					Deck oldDeck;
+					while ((oldDeck = DeckList.DecksList.FirstOrDefault(d => d.Name == deckName)) != null)
+					{
+						DeckList.DecksList.Remove(oldDeck);
+						DeckPickerList.RemoveDeck(oldDeck);
                     }
-                }
-                _deckList.LastDeckClass.Add(new DeckInfo(){Class = deck.Class, Name = deck.Name});
-                _xmlManager.Save("PlayerDecks.xml", _deckList);
+
+					SaveDeck(true);
             }
+				else if (result == MessageDialogResult.Negative)
+					SaveDeck(false);
         }
+			else
+				SaveDeck(false);
 
-        #endregion
-
-        #region NEW DECK GUI
-
-        private void ComboBoxFilterClass_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (!_initialized) return;
-            _newDeck.Class = ComboBoxSelectClass.SelectedValue.ToString();
-            _newContainsDeck = true;
-            UpdateDbListView();
+			FlyoutNewDeckSetTags.IsOpen = false;
         }
         
-        private void BtnSaveDeck_Click(object sender, RoutedEventArgs e)
-        {
-            SaveDeck();
-            FlyoutSetTags.IsOpen = false;
-        }
-
         private void ComboBoxFilterMana_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (!_initialized) return;
@@ -1048,59 +757,18 @@ Console.WriteLine("HandlePlayerMulligan");
 
         private void TextBoxDBFilter_KeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Key == Key.Enter)
+			if (e.Key == Key.Enter && ListViewDB.Items.Count == 1)
             {
-                if (ListViewDB.Items.Count == 1)
-                {
-                    var card = (Card) ListViewDB.Items[0];
-                    AddCardToDeck(card);
+				var card = (Card)ListViewDB.Items[0];
+				AddCardToDeck((Card)card.Clone());
                 }
             }
-        }
 
-        private async void BtnImport_OnClick(object sender, RoutedEventArgs e)
+		private void BtnImport_OnClick(object sender, RoutedEventArgs e)
         {
-            var settings = new MetroDialogSettings();
-
-            var clipboard = Clipboard.GetText();
-            if (clipboard.Contains("hearthstats") || clipboard.Contains("hearthpwn"))
-            {
-                settings.DefaultText = clipboard;
+			FlyoutDeckImport.IsOpen = true;
+			DeckImportFlyout.BtnLastGame.IsEnabled = Game.DrawnLastGame != null;
             }
-
-            //import dialog
-            var url = await this.ShowInputAsync("Import deck\nCurrently works with:\nhearthstats\nhearthpwn", "Url:", settings);
-            if (string.IsNullOrEmpty(url))
-                return;
-
-            var controller = await this.ShowProgressAsync("Loading Deck...", "please wait");
-
-            var deck = await _deckImporter.Import(url);
-
-            await controller.CloseAsync();
-
-            if (deck != null)
-            {
-                ClearNewDeckSection();
-                _newContainsDeck = true;
-
-                _newDeck = (Deck)deck.Clone();
-                ListViewNewDeck.ItemsSource = _newDeck.Cards;
-
-                if (ComboBoxSelectClass.Items.Contains(_newDeck.Class))
-                    ComboBoxSelectClass.SelectedValue = _newDeck.Class;
-
-                TextBoxDeckName.Text = _newDeck.Name;
-                UpdateNewDeckHeader(true);
-                UpdateDbListView();
-            }
-            else
-            {
-                await this.ShowMessageAsync("Error", "Could not load deck from specified url");
-            }
-
-
-        }
 
         private void ListViewDB_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
@@ -1113,14 +781,13 @@ Console.WriteLine("HandlePlayerMulligan");
             if (originalSource != null)
             {
                 var card = (Card)ListViewDB.SelectedItem;
-                AddCardToDeck(card);
+				AddCardToDeck((Card)card.Clone());
                 _newContainsDeck = true;
             }
         }
 
         private void ListViewNewDeck_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
-
             var originalSource = (DependencyObject)e.OriginalSource;
             while ((originalSource != null) && !(originalSource is ListViewItem))
             {
@@ -1136,7 +803,6 @@ Console.WriteLine("HandlePlayerMulligan");
 
         private void ListViewNewDeck_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
         {
-
             var originalSource = (DependencyObject)e.OriginalSource;
             while ((originalSource != null) && !(originalSource is ListViewItem))
             {
@@ -1146,7 +812,7 @@ Console.WriteLine("HandlePlayerMulligan");
             if (originalSource != null)
             {
                 var card = (Card)ListViewNewDeck.SelectedItem;
-                AddCardToDeck(card);
+				AddCardToDeck((Card)card.Clone());
             }
         }
 
@@ -1154,11 +820,21 @@ Console.WriteLine("HandlePlayerMulligan");
         {
             if (e.Key == Key.Enter)
             {
-                var card = (Card) ListViewDB.SelectedItem;
+				var card = (Card)ListViewDB.SelectedItem;
                 if (string.IsNullOrEmpty(card.Name)) return;
-                AddCardToDeck(card);
+				AddCardToDeck((Card)card.Clone());
             }
         }
+
+		private void TextBoxDBFilter_TextChanged(object sender, TextChangedEventArgs e)
+		{
+			UpdateDbListView();
+		}
+
+		private void BtnClear_Click(object sender, RoutedEventArgs e)
+		{
+			ShowClearNewDeckMessage();
+		}
 
         #endregion
 
@@ -1176,9 +852,9 @@ Console.WriteLine("HandlePlayerMulligan");
             {
                 ListViewDB.Items.Clear();
 
-                foreach (var card in _hearthstone.GetActualCards())
+				foreach (var card in Game.GetActualCards())
                 {
-                    if (!card.Name.ToLower().Contains(TextBoxDBFilter.Text.ToLower()))
+					if (!card.LocalizedName.ToLowerInvariant().Contains(TextBoxDBFilter.Text.ToLowerInvariant()))
                         continue;
                     // mana filter
                     if (ComboBoxFilterMana.SelectedItem.ToString() == "All"
@@ -1193,75 +869,94 @@ Console.WriteLine("HandlePlayerMulligan");
                                 break;
                             case "Class Only":
                                 if (card.GetPlayerClass == selectedClass)
-                                {
                                     ListViewDB.Items.Add(card);
-                                }
                                 break;
                             case "Neutral Only":
                                 if (card.GetPlayerClass == "Neutral")
-                                {
                                     ListViewDB.Items.Add(card);
-                                }
                                 break;
                         }
                     }
                 }
 
-
-                var view1 = (CollectionView) CollectionViewSource.GetDefaultView(ListViewDB.Items);
-                view1.SortDescriptions.Add(new SortDescription("Cost", ListSortDirection.Ascending));
-                view1.SortDescriptions.Add(new SortDescription("Type", ListSortDirection.Descending));
-                view1.SortDescriptions.Add(new SortDescription("Name", ListSortDirection.Ascending));
+				Helper.SortCardCollection(ListViewDB.Items, Config.Instance.CardSortingClassFirst);
             }
         }
 
-        private void SaveDeck()
+		private async void SaveDeck(bool overwrite)
         {
-            if (_newDeck.Cards.Sum(c => c.Count) != 30)
+			var deckName = TextBoxDeckName.Text;
+
+			if (string.IsNullOrEmpty(deckName))
             {
-                var result =
-                    MessageBox.Show(
-                        string.Format("Deck contains {0} cards. Is this what you want to save?",
-                                      _newDeck.Cards.Sum(c => c.Count)),
-                        "Deck does not contain 30 cards.", MessageBoxButton.YesNo);
-                if (result != MessageBoxResult.Yes)
+				var settings = new MetroDialogSettings { AffirmativeButtonText = "Set", DefaultText = deckName };
+
+				var name = await this.ShowInputAsync("No name set", "Please set a name for the deck", settings);
+
+				if (String.IsNullOrEmpty(name))
                     return;
+
+				deckName = name;
+				TextBoxDeckName.Text = name;
             }
-            var deckName = TextBoxDeckName.Text;
-            if (string.IsNullOrEmpty(deckName))
+
+			while (DeckList.DecksList.Any(d => d.Name == deckName) && (!EditingDeck || !overwrite))
             {
-                MessageBox.Show("Please set a name for the deck.");
+				var settings = new MetroDialogSettings { AffirmativeButtonText = "Set", DefaultText = deckName };
+				var name =
+					await
+					this.ShowInputAsync("Name already exists", "You already have a deck with that name, please select a different one.",
+										settings);
+
+				if (String.IsNullOrEmpty(name))
+                return;
+
+				deckName = name;
+				TextBoxDeckName.Text = name;
+            }
+
+			if (NewDeck.Cards.Sum(c => c.Count) != 30)
+            {
+				var settings = new MetroDialogSettings { AffirmativeButtonText = "Yes", NegativeButtonText = "No" };
+
+				var result =
+					await
+					this.ShowMessageAsync("Not 30 cards",
+										  string.Format("Deck contains {0} cards. Is this what you want to save anyway?", NewDeck.Cards.Sum(c => c.Count)),
+										  MessageDialogStyle.AffirmativeAndNegative, settings);
+				if (result != MessageDialogResult.Affirmative)
                 return;
             }
-            if (_deckList.DecksList.Any(d => d.Name == deckName) && !_editingDeck)
+
+			if (EditingDeck && overwrite)
             {
-                MessageBox.Show("You already have a deck with that name!");
-                return;
+				DeckList.DecksList.Remove(NewDeck);
+				DeckPickerList.RemoveDeck(NewDeck);
             }
-            if (_editingDeck)
-            {
-                _deckList.DecksList.Remove(_newDeck);
-                DeckPickerList.RemoveDeck(_newDeck);
-            }
-            _newDeck.Name = deckName;
-            _newDeck.Class = ComboBoxSelectClass.SelectedValue.ToString();
+			NewDeck.Name = deckName;
+			NewDeck.Class = ComboBoxSelectClass.SelectedValue.ToString();
+			NewDeck.Tags = TagControlNewDeck.GetTags();
             
-            var newDeckClone = (Deck) _newDeck.Clone();
-            _deckList.DecksList.Add(newDeckClone);
+			var newDeckClone = (Deck)NewDeck.Clone();
+			DeckList.DecksList.Add(newDeckClone);
             DeckPickerList.AddAndSelectDeck(newDeckClone);
-            _xmlManager.Save("PlayerDecks.xml", _deckList);
+
+			newDeckClone.LastEdited = DateTime.Now;
+
+			WriteDecks();
             BtnSaveDeck.Content = "Save";
 
-            TabControlTracker.SelectedIndex = 0;
-            _editingDeck = false;
+			if (EditingDeck)
+				TagControlNewDeck.SetSelectedTags(new List<string>());
 
-            foreach (var tag in _newDeck.Tags)
-            {
-                TagControlFilter.AddSelectedTag(tag);
-            }
+            TabControlTracker.SelectedIndex = 0;
+			EditingDeck = false;
+
+			foreach (var tag in NewDeck.Tags)
+				SortFilterDecksFlyout.AddSelectedTag(tag);
 
             DeckPickerList.UpdateList();
-            //ListboxDecks.SelectedItem = _deckList.DecksList.First(d => d.Equals(_newDeck));
+			DeckPickerList.SelectDeck(newDeckClone);
 
             ClearNewDeckSection();
         }
@@ -1273,65 +968,91 @@ Console.WriteLine("HandlePlayerMulligan");
             TextBoxDeckName.Text = string.Empty;
             TextBoxDBFilter.Text = string.Empty;
             ComboBoxFilterMana.SelectedIndex = 0;
-            _newDeck.Cards.Clear();
-            _newDeck.Class = string.Empty;
-            _newDeck.Name = string.Empty;
+			NewDeck = new Deck();
+			ListViewNewDeck.ItemsSource = NewDeck.Cards;
             _newContainsDeck = false;
+			EditingDeck = false;
+			ManaCurveNewDeck.ClearDeck();
         }
 
         private void RemoveCardFromDeck(Card card)
         {
+			if (card == null)
+				return;
             if (card.Count > 1)
             {
-                _newDeck.Cards.Remove(card);
                 card.Count--;
-                _newDeck.Cards.Add(card);
+				ManaCurveNewDeck.UpdateValues();
             }
             else
-                _newDeck.Cards.Remove(card);
+				NewDeck.Cards.Remove(card);
 
-            SortCardCollection(ListViewNewDeck.Items);
+			ManaCurveNewDeck.SetDeck(NewDeck);
+			Helper.SortCardCollection(ListViewNewDeck.Items, Config.Instance.CardSortingClassFirst);
             BtnSaveDeck.Content = "Save*";
             UpdateNewDeckHeader(true);
         }
 
         private void UpdateNewDeckHeader(bool show)
         {
-            var headerText = "New Deck";
-            var cardCount = _newDeck.Cards.Sum(c => c.Count);
+			const string headerText = "New Deck";
+			var cardCount = NewDeck.Cards.Sum(c => c.Count);
             TabItemNewDeck.Header = show ? string.Format("{0} ({1})", headerText, cardCount) : headerText;
-           /* if (!_config.KeepDecksVisible)
-            {
-                _hearthstone.EnemyCards.Clear();
-                _hearthstone.EnemyHandCount = 0;
-                _hearthstone.OpponentDeckCount = 30;
-            } why is this here!?*/
+			UpdateTabMarker();
         }
 
         private void AddCardToDeck(Card card)
         {
-            if (_newDeck.Cards.Contains(card))
+			if (card == null)
+				return;
+			if (NewDeck.Cards.Contains(card))
             {
-                var cardInDeck = _newDeck.Cards.First(c => c.Name == card.Name);
-                _newDeck.Cards.Remove(cardInDeck);
+				var cardInDeck = NewDeck.Cards.First(c => c.Name == card.Name);
                 cardInDeck.Count++;
-                _newDeck.Cards.Add(cardInDeck);
+				ManaCurveNewDeck.UpdateValues();
             }
             else
             {
-                _newDeck.Cards.Add(card);
+				NewDeck.Cards.Add(card);
             }
 
-            SortCardCollection(ListViewNewDeck.Items);
+			ManaCurveNewDeck.SetDeck(NewDeck);
+			Helper.SortCardCollection(ListViewNewDeck.Items, Config.Instance.CardSortingClassFirst);
             BtnSaveDeck.Content = "Save*";
             UpdateNewDeckHeader(true);
         }
 
-        private void TextBoxDBFilter_TextChanged(object sender, TextChangedEventArgs e)
+		public void SetNewDeck(Deck deck, bool editing = false)
+		{
+			if (deck != null)
         {
+				ClearNewDeckSection();
+				_newContainsDeck = true;
+				EditingDeck = editing;
+
+				NewDeck = (Deck)deck.Clone();
+				ListViewNewDeck.ItemsSource = NewDeck.Cards;
+				Helper.SortCardCollection(ListViewNewDeck.ItemsSource, false);
+
+				if (ComboBoxSelectClass.Items.Contains(NewDeck.Class))
+					ComboBoxSelectClass.SelectedValue = NewDeck.Class;
+
+				TextBoxDeckName.Text = NewDeck.Name;
+				UpdateNewDeckHeader(true);
             UpdateDbListView();
         }
+		}
 
+		private async void ShowClearNewDeckMessage()
+		{
+			var settings = new MetroDialogSettings { AffirmativeButtonText = "Yes", NegativeButtonText = "No" };
+			var result = await this.ShowMessageAsync("Clear deck?", "", MessageDialogStyle.AffirmativeAndNegative, settings);
+			if (result == MessageDialogResult.Affirmative)
+			{
+				ClearNewDeckSection();
+				UpdateTabMarker();
+			}
+		}
         
         #endregion
 
@@ -1340,447 +1061,1403 @@ Console.WriteLine("HandlePlayerMulligan");
         private void CheckboxHighlightCardsInHand_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HighlightCardsInHand = true;
-            Hearthstone.HighlightCardsInHand = true;
+			Config.Instance.HighlightCardsInHand = true;
+			Game.HighlightCardsInHand = true;
             SaveConfig(true);
         }
 
         private void CheckboxHighlightCardsInHand_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HighlightCardsInHand = false;
-            Hearthstone.HighlightCardsInHand = false;
+			Config.Instance.HighlightCardsInHand = false;
+			Game.HighlightCardsInHand = false;
             SaveConfig(true);
         }
 
         private void CheckboxHideOverlay_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideOverlay = true;
+			Config.Instance.HideOverlay = true;
             SaveConfig(true);
         }
 
         private void CheckboxHideOverlay_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideOverlay = false;
+			Config.Instance.HideOverlay = false;
             SaveConfig(true);
         }
 
         private void CheckboxHideOverlayInMenu_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideInMenu = true;
+			Config.Instance.HideInMenu = true;
             SaveConfig(true);
         }
 
         private void CheckboxHideOverlayInMenu_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideInMenu = false;
+			Config.Instance.HideInMenu = false;
             SaveConfig(true);
         }
 
         private void CheckboxHideDrawChances_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideDrawChances = true;
+			Config.Instance.HideDrawChances = true;
             SaveConfig(true);
-                    _playerWindow.LblDrawChance1.Visibility = Visibility.Collapsed;
-                    _playerWindow.LblDrawChance2.Visibility = Visibility.Collapsed;
-
+			PlayerWindow.LblDrawChance1.Visibility = Visibility.Collapsed;
+			PlayerWindow.LblDrawChance2.Visibility = Visibility.Collapsed;
         }
 
         private void CheckboxHideDrawChances_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideDrawChances = false;
+			Config.Instance.HideDrawChances = false;
             SaveConfig(true);
-                    _playerWindow.LblDrawChance1.Visibility = Visibility.Visible;
-                    _playerWindow.LblDrawChance2.Visibility = Visibility.Visible;
+			PlayerWindow.LblDrawChance1.Visibility = Visibility.Visible;
+			PlayerWindow.LblDrawChance2.Visibility = Visibility.Visible;
         }
 
         private void CheckboxHideOpponentDrawChances_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideOpponentDrawChances = true;
+			Config.Instance.HideOpponentDrawChances = true;
             SaveConfig(true);
-                _opponentWindow.LblOpponentDrawChance2.Visibility = Visibility.Collapsed;
-                _opponentWindow.LblOpponentDrawChance1.Visibility = Visibility.Collapsed;
+			OpponentWindow.LblOpponentDrawChance2.Visibility = Visibility.Collapsed;
+			OpponentWindow.LblOpponentDrawChance1.Visibility = Visibility.Collapsed;
         }
 
         private void CheckboxHideOpponentDrawChances_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideOpponentDrawChances = false;
+			Config.Instance.HideOpponentDrawChances = false;
             SaveConfig(true);
-                _opponentWindow.LblOpponentDrawChance2.Visibility = Visibility.Visible;
-                _opponentWindow.LblOpponentDrawChance1.Visibility = Visibility.Visible;
+			OpponentWindow.LblOpponentDrawChance2.Visibility = Visibility.Visible;
+			OpponentWindow.LblOpponentDrawChance1.Visibility = Visibility.Visible;
+		}
 
-        }
         private void CheckboxHidePlayerCardCounter_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HidePlayerCardCount = true;
+			Config.Instance.HidePlayerCardCount = true;
             SaveConfig(true);
-                    _playerWindow.LblCardCount.Visibility = Visibility.Collapsed;
-                    _playerWindow.LblDeckCount.Visibility = Visibility.Collapsed;
+			PlayerWindow.LblCardCount.Visibility = Visibility.Collapsed;
+			PlayerWindow.LblDeckCount.Visibility = Visibility.Collapsed;
         }
 
         private void CheckboxHidePlayerCardCounter_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HidePlayerCardCount = false;
+			Config.Instance.HidePlayerCardCount = false;
+			SaveConfig(true);
+			PlayerWindow.LblCardCount.Visibility = Visibility.Visible;
+			PlayerWindow.LblDeckCount.Visibility = Visibility.Visible;
+		}
+
+		private void CheckboxHidePlayerCards_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HidePlayerCards = true;
+			SaveConfig(true);
+			PlayerWindow.ListViewPlayer.Visibility = Visibility.Collapsed;
+		}
+
+		private void CheckboxHidePlayerCards_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HidePlayerCards = false;
+			SaveConfig(true);
+			PlayerWindow.ListViewPlayer.Visibility = Visibility.Visible;
+		}
+
+		private void CheckboxHideOpponentCardCounter_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HideOpponentCardCount = true;
+			SaveConfig(true);
+			OpponentWindow.LblOpponentCardCount.Visibility = Visibility.Collapsed;
+			OpponentWindow.LblOpponentDeckCount.Visibility = Visibility.Collapsed;
+		}
+
+		private void CheckboxHideOpponentCardCounter_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HideOpponentCardCount = false;
+			SaveConfig(true);
+			OpponentWindow.LblOpponentCardCount.Visibility = Visibility.Visible;
+			OpponentWindow.LblOpponentDeckCount.Visibility = Visibility.Visible;
+		}
+
+		private void CheckboxHideOpponentCards_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HideOpponentCards = true;
             SaveConfig(true);
-                    _playerWindow.LblCardCount.Visibility = Visibility.Visible;
-                    _playerWindow.LblDeckCount.Visibility = Visibility.Visible;
+			OpponentWindow.ListViewOpponent.Visibility = Visibility.Collapsed;
         }
 
-        private void CheckboxHideEnemyCardCounter_Checked(object sender, RoutedEventArgs e)
+		private void CheckboxHideOpponentCards_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideEnemyCardCount = true;
+			Config.Instance.HideOpponentCards = false;
             SaveConfig(true);
-                    _opponentWindow.LblOpponentCardCount.Visibility = Visibility.Collapsed;
-                    _opponentWindow.LblOpponentDeckCount.Visibility = Visibility.Collapsed;
+			OpponentWindow.ListViewOpponent.Visibility = Visibility.Visible;
         }
 
-        private void CheckboxHideEnemyCardCounter_Unchecked(object sender, RoutedEventArgs e)
+		private void CheckboxHideOpponentCardAge_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideEnemyCardCount = false;
+			Config.Instance.HideOpponentCardAge = false;
             SaveConfig(true);
-                    _opponentWindow.LblOpponentCardCount.Visibility = Visibility.Visible;
-                    _opponentWindow.LblOpponentDeckCount.Visibility = Visibility.Visible;
         }
 
-        private void CheckboxHideEnemyCards_Checked(object sender, RoutedEventArgs e)
+		private void CheckboxHideOpponentCardAge_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideEnemyCards = true;
+			Config.Instance.HideOpponentCardAge = true;
             SaveConfig(true);
         }
 
-        private void CheckboxHideEnemyCards_Unchecked(object sender, RoutedEventArgs e)
+		private void CheckboxHideOpponentCardMarks_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideEnemyCards = false;
+			Config.Instance.HideOpponentCardMarks = false;
             SaveConfig(true);
         }
 
+		private void CheckboxHideOpponentCardMarks_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HideOpponentCardMarks = true;
+			SaveConfig(true);
+		}
 
         private void CheckboxHideOverlayInBackground_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideInBackground = true;
+			Config.Instance.HideInBackground = true;
             SaveConfig(true);
         }
 
         private void CheckboxHideOverlayInBackground_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.HideInBackground = false;
+			Config.Instance.HideInBackground = false;
             SaveConfig(true);
         }
 
         private void CheckboxWindowsTopmost_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.WindowsTopmost = true;
-            _playerWindow.Topmost = true;
-            _opponentWindow.Topmost = true;
-            CheckboxWinTopmostHsForeground.IsEnabled = true;
+			Config.Instance.WindowsTopmost = true;
+			PlayerWindow.Topmost = true;
+			OpponentWindow.Topmost = true;
+			CheckboxWinTopmostHsForeground.IsEnabled = true;
             SaveConfig(true);
         }
 
         private void CheckboxWindowsTopmost_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.WindowsTopmost = false;
-            _playerWindow.Topmost = false;
-            _opponentWindow.Topmost = false;
-            CheckboxWinTopmostHsForeground.IsEnabled = false;
-            CheckboxWinTopmostHsForeground.IsChecked = false;
+			Config.Instance.WindowsTopmost = false;
+			PlayerWindow.Topmost = false;
+			OpponentWindow.Topmost = false;
+			CheckboxWinTopmostHsForeground.IsEnabled = false;
+			CheckboxWinTopmostHsForeground.IsChecked = false;
             SaveConfig(true);
         }
 
         private void CheckboxWindowsOpenAutomatically_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.WindowsOnStartup = true;
+			PlayerWindow.Show();
+			PlayerWindow.Activate();
+			OpponentWindow.Show();
+			OpponentWindow.Activate();
+
+			PlayerWindow.SetCardCount(Game.PlayerHandCount, 30 - Game.PlayerDrawn.Where(c => !c.IsStolen).Sum(card => card.Count));
+
+			OpponentWindow.SetOpponentCardCount(Game.OpponentHandCount, Game.OpponentDeckCount, Game.OpponentHasCoin);
+
+			Config.Instance.WindowsOnStartup = true;
             SaveConfig(true);
         }
 
         private void CheckboxWindowsOpenAutomatically_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.WindowsOnStartup = false;
+			PlayerWindow.Hide();
+			OpponentWindow.Hide();
+			Config.Instance.WindowsOnStartup = false;
             SaveConfig(true);
         }
 
-        private void SaveConfig(bool updateOverlay)
+		private void CheckboxWinTopmostHsForeground_Checked(object sender, RoutedEventArgs e)
         {
-            _xmlManagerConfig.Save("config.xml", _config);
-            if(updateOverlay)
-                _overlay.Update(true);
+			if (!_initialized) return;
+			Config.Instance.WindowsTopmostIfHsForeground = true;
+			PlayerWindow.Topmost = false;
+			OpponentWindow.Topmost = false;
+			SaveConfig(false);
         }
 
-        private void BtnShowWindows_Click(object sender, RoutedEventArgs e)
+		private void CheckboxWinTopmostHsForeground_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.WindowsTopmostIfHsForeground = false;
+			if (Config.Instance.WindowsTopmost)
         {
-            //show playeroverlay and enemy overlay
-            _playerWindow.Show();
-            _playerWindow.Activate();
-            _opponentWindow.Show();
-            _opponentWindow.Activate();
+				PlayerWindow.Topmost = true;
+				OpponentWindow.Topmost = true;
+			}
+			SaveConfig(false);
+		}
 
-            _playerWindow.SetCardCount(_hearthstone.PlayerHandCount,
-                                       30 - _hearthstone.PlayerDrawn.Sum(card => card.Count));
-
-            _opponentWindow.SetOpponentCardCount(_hearthstone.EnemyHandCount,
-                                                 _hearthstone.OpponentDeckCount, _hearthstone.OpponentHasCoin);
+		private void CheckboxTimerTopmost_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.TimerWindowTopmost = true;
+			TimerWindow.Topmost = true;
+			CheckboxTimerTopmostHsForeground.IsEnabled = true;
+			SaveConfig(true);
         }
 
-        private void RangeSliderPlayer_UpperValueChanged(object sender, RangeParameterChangedEventArgs e)
+		private void CheckboxTimerTopmost_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.PlayerDeckTop = 100 - RangeSliderPlayer.UpperValue;
-            _config.PlayerDeckHeight = RangeSliderPlayer.UpperValue - RangeSliderPlayer.LowerValue;
+			Config.Instance.TimerWindowTopmost = false;
+			TimerWindow.Topmost = false;
+			CheckboxTimerTopmostHsForeground.IsEnabled = false;
+			CheckboxTimerTopmostHsForeground.IsChecked = false;
+			SaveConfig(true);
         }
 
-        private void RangeSliderPlayer_LowerValueChanged(object sender, RangeParameterChangedEventArgs e)
+		private void CheckboxTimerWindow_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.PlayerDeckHeight = RangeSliderPlayer.UpperValue - RangeSliderPlayer.LowerValue;
+			TimerWindow.Show();
+			TimerWindow.Activate();
+			Config.Instance.TimerWindowOnStartup = true;
+			SaveConfig(true);
         }
 
-        private void SliderPlayer_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		private void CheckboxTimerWindow_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.PlayerDeckLeft = SliderPlayer.Value;
+			TimerWindow.Hide();
+			Config.Instance.TimerWindowOnStartup = false;
             SaveConfig(true);
         }
 
-        private void RangeSliderOpponent_UpperValueChanged(object sender, RangeParameterChangedEventArgs e)
+		private void CheckboxTimerTopmostHsForeground_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.TimerWindowTopmostIfHsForeground = true;
+			TimerWindow.Topmost = false;
+			SaveConfig(false);
+		}
+
+		private void CheckboxTimerTopmostHsForeground_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.OpponentDeckTop = 100 - RangeSliderOpponent.UpperValue;
-            _config.OpponentDeckHeight = RangeSliderOpponent.UpperValue - RangeSliderOpponent.LowerValue;
+			Config.Instance.TimerWindowTopmostIfHsForeground = false;
+			if (Config.Instance.TimerWindowTopmost)
+			{
+				TimerWindow.Topmost = true;
+			}
+			SaveConfig(false);
+		}
+
+		private void SaveConfig(bool updateOverlay)
+		{
+			Config.Save();
+			if (updateOverlay)
+				Overlay.Update(true);
         }
 
-        private void RangeSliderOpponent_LowerValueChanged(object sender, RangeParameterChangedEventArgs e)
+
+		private void SliderOverlayOpacity_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (!_initialized) return;
-            _config.OpponentDeckHeight = RangeSliderOpponent.UpperValue - RangeSliderOpponent.LowerValue;
+			Config.Instance.OverlayOpacity = SliderOverlayOpacity.Value;
+			SaveConfig(true);
         }
 
-        private void SliderOpponent_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		private void SliderOpponentOpacity_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (!_initialized) return;
-            _config.OpponentDeckLeft = SliderOpponent.Value;
+			Config.Instance.OpponentOpacity = SliderOpponentOpacity.Value;
             SaveConfig(true);
         }
 
-        private void Slider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		private void SliderPlayerOpacity_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (!_initialized) return;
-            _config.OverlayOpacity = SliderOverlayOpacity.Value;
+			Config.Instance.PlayerOpacity = SliderPlayerOpacity.Value;
             SaveConfig(true);
         }
 
         private void CheckboxKeepDecksVisible_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.KeepDecksVisible = true;
+			Config.Instance.KeepDecksVisible = true;
             SaveConfig(true);
         }
 
         private void CheckboxKeepDecksVisible_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.KeepDecksVisible = false;
+			Config.Instance.KeepDecksVisible = false;
             SaveConfig(true);
         }
 
         private void CheckboxMinimizeTray_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.MinimizeToTray = true;
+			Config.Instance.MinimizeToTray = true;
             SaveConfig(false);
         }
 
         private void CheckboxMinimizeTray_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.MinimizeToTray = false;
+			Config.Instance.MinimizeToTray = false;
             SaveConfig(false);
         }
+
         private void CheckboxSameScaling_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.UseSameScaling = true;
+			Config.Instance.UseSameScaling = true;
             SaveConfig(false);
         }
 
         private void CheckboxSameScaling_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            _config.UseSameScaling = false;
+			Config.Instance.UseSameScaling = false;
+			SaveConfig(false);
+		}
+
+		private void CheckboxDeckDetection_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.AutoDeckDetection = true;
+			CheckboxAutoSelectDeck.IsEnabled = true;
+			SaveConfig(false);
+		}
+
+		private void CheckboxDeckDetection_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.AutoDeckDetection = false;
+			CheckboxAutoSelectDeck.IsChecked = false;
+			CheckboxAutoSelectDeck.IsEnabled = false;
+			SaveConfig(false);
+		}
+
+		private void CheckboxAutoSelectDeck_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.AutoSelectDetectedDeck = true;
+			SaveConfig(false);
+		}
+
+		private void CheckboxAutoSelectDeck_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.AutoSelectDetectedDeck = false;
+			SaveConfig(false);
+		}
+
+		private void SliderOverlayPlayerScaling_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		{
+			if (!_initialized) return;
+			var scaling = SliderOverlayPlayerScaling.Value;
+			Config.Instance.OverlayPlayerScaling = scaling;
+			SaveConfig(false);
+			Overlay.UpdateScaling();
+
+			if (Config.Instance.UseSameScaling && SliderOverlayOpponentScaling.Value != scaling)
+			{
+				SliderOverlayOpponentScaling.Value = scaling;
+			}
+		}
+
+		private void SliderOverlayOpponentScaling_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		{
+			if (!_initialized) return;
+			var scaling = SliderOverlayOpponentScaling.Value;
+			Config.Instance.OverlayOpponentScaling = scaling;
+			SaveConfig(false);
+			Overlay.UpdateScaling();
+
+			if (Config.Instance.UseSameScaling && SliderOverlayPlayerScaling.Value != scaling)
+			{
+				SliderOverlayPlayerScaling.Value = scaling;
+			}
+		}
+
+		private void Hyperlink_RequestNavigate(object sender, RequestNavigateEventArgs e)
+		{
+			Process.Start(e.Uri.AbsoluteUri);
+		}
+
+		private void CheckboxHideTimers_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HideTimers = true;
+			SaveConfig(true);
+		}
+
+		private void CheckboxHideTimers_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HideTimers = false;
+			SaveConfig(true);
+		}
+
+		private void SliderTimersHorizontalSpacing_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		{
+			if (!_initialized) return;
+			Config.Instance.TimersHorizontalSpacing = SliderTimersHorizontalSpacing.Value;
+			SaveConfig(true);
+		}
+
+		private void SliderTimersVerticalSpacing_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		{
+			if (!_initialized) return;
+			Config.Instance.TimersVerticalSpacing = SliderTimersVerticalSpacing.Value;
+			SaveConfig(true);
+		}
+
+		private void ComboboxAccent_SelectionChanged(object sender, SelectionChangedEventArgs e)
+		{
+			if (!_initialized) return;
+			var accent = ComboboxAccent.SelectedItem as Accent;
+			if (accent != null)
+			{
+				ThemeManager.ChangeAppStyle(Application.Current, accent, ThemeManager.DetectAppStyle().Item1);
+				Config.Instance.AccentName = accent.Name;
+				SaveConfig(false);
+			}
+		}
+
+		private void ComboboxTheme_SelectionChanged(object sender, SelectionChangedEventArgs e)
+		{
+			if (!_initialized) return;
+			var theme = ComboboxTheme.SelectedItem as AppTheme;
+			if (theme != null)
+			{
+				ThemeManager.ChangeAppStyle(Application.Current, ThemeManager.DetectAppStyle().Item2, theme);
+				Config.Instance.ThemeName = theme.Name;
+				//if(ComboboxWindowBackground.SelectedItem.ToString() != "Default")
+				UpdateAdditionalWindowsBackground();
+				SaveConfig(false);
+			}
+		}
+
+		private void ComboboxWindowBackground_SelectionChanged(object sender, SelectionChangedEventArgs e)
+		{
+			if (!_initialized) return;
+			TextboxCustomBackground.IsEnabled = ComboboxWindowBackground.SelectedItem.ToString() == "Custom";
+			Config.Instance.SelectedWindowBackground = ComboboxWindowBackground.SelectedItem.ToString();
+			UpdateAdditionalWindowsBackground();
+		}
+
+		private void UpdateAdditionalWindowsBackground(Brush brush = null)
+		{
+			var background = brush;
+
+			switch (ComboboxWindowBackground.SelectedItem.ToString())
+			{
+				case "Theme":
+					background = Background;
+					break;
+				case "Light":
+					background = SystemColors.ControlLightBrush;
+					break;
+				case "Dark":
+					background = SystemColors.ControlDarkDarkBrush;
+					break;
+			}
+			if (background == null)
+			{
+				var hexBackground = BackgroundFromHex();
+				if (hexBackground != null)
+				{
+					PlayerWindow.Background = hexBackground;
+					OpponentWindow.Background = hexBackground;
+					TimerWindow.Background = hexBackground;
+				}
+			}
+			else
+			{
+				PlayerWindow.Background = background;
+				OpponentWindow.Background = background;
+				TimerWindow.Background = background;
+			}
+		}
+
+		private SolidColorBrush BackgroundFromHex()
+		{
+			SolidColorBrush brush = null;
+			var hex = TextboxCustomBackground.Text;
+			if (hex.StartsWith("#")) hex = hex.Remove(0, 1);
+			if (!string.IsNullOrEmpty(hex) && hex.Length == 6 && Helper.IsHex(hex))
+			{
+				var color = ColorTranslator.FromHtml("#" + hex);
+				brush = new SolidColorBrush(Color.FromRgb(color.R, color.G, color.B));
+			}
+			return brush;
+		}
+
+		private void TextboxCustomBackground_TextChanged(object sender, TextChangedEventArgs e)
+		{
+			if (!_initialized || ComboboxWindowBackground.SelectedItem.ToString() != "Custom") return;
+			var background = BackgroundFromHex();
+			if (background != null)
+			{
+				UpdateAdditionalWindowsBackground(background);
+				Config.Instance.WindowsBackgroundHex = TextboxCustomBackground.Text;
+				SaveConfig(false);
+			}
+		}
+
+		private void ComboboxTextLocationOpponent_SelectionChanged(object sender, SelectionChangedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.TextOnTopOpponent = ComboboxTextLocationOpponent.SelectedItem.ToString() == "Top";
+
+			SaveConfig(false);
+			Overlay.SetOpponentTextLocation(Config.Instance.TextOnTopOpponent);
+			OpponentWindow.SetTextLocation(Config.Instance.TextOnTopOpponent);
+		}
+
+		private void ComboboxTextLocationPlayer_SelectionChanged(object sender, SelectionChangedEventArgs e)
+		{
+			if (!_initialized) return;
+
+			Config.Instance.TextOnTopPlayer = ComboboxTextLocationPlayer.SelectedItem.ToString() == "Top";
+			SaveConfig(false);
+
+			Overlay.SetPlayerTextLocation(Config.Instance.TextOnTopPlayer);
+			PlayerWindow.SetTextLocation(Config.Instance.TextOnTopPlayer);
+		}
+
+		private async void ComboboxLanguages_SelectionChanged(object sender, SelectionChangedEventArgs e)
+		{
+			if (!_initialized) return;
+			var language = ComboboxLanguages.SelectedValue.ToString();
+			if (!Helper.LanguageDict.ContainsKey(language))
+				return;
+
+			var selectedLanguage = Helper.LanguageDict[language];
+
+			if (!File.Exists(string.Format("Files/cardsDB.{0}.json", selectedLanguage)))
+			{
+				return;
+			}
+
+			Config.Instance.SelectedLanguage = selectedLanguage;
+
+
+			await Restart();
+		}
+
+		private void CheckboxExportName_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized)
+				return;
+			Config.Instance.ExportSetDeckName = true;
+			SaveConfig(false);
+		}
+
+		private void CheckboxExportName_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized)
+				return;
+			Config.Instance.ExportSetDeckName = false;
+			SaveConfig(false);
+		}
+
+		private void CheckboxPrioGolden_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized)
+				return;
+			Config.Instance.PrioritizeGolden = true;
+			SaveConfig(false);
+		}
+
+		private void CheckboxPrioGolden_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized)
+				return;
+			Config.Instance.PrioritizeGolden = false;
+			SaveConfig(false);
+		}
+
+		private void ComboboxKeyPressGameStart_SelectionChanged(object sender, SelectionChangedEventArgs e)
+		{
+			if (!_initialized)
+				return;
+			Config.Instance.KeyPressOnGameStart = ComboboxKeyPressGameStart.SelectedValue.ToString();
+			SaveConfig(false);
+		}
+
+		private void ComboboxKeyPressGameEnd_SelectionChanged(object sender, SelectionChangedEventArgs e)
+		{
+			if (!_initialized)
+				return;
+			Config.Instance.KeyPressOnGameEnd = ComboboxKeyPressGameEnd.SelectedValue.ToString();
             SaveConfig(false);
         }
         
-        private void CheckboxWinTopmostHsForeground_Checked(object sender, RoutedEventArgs e)
-        {
-            if (!_initialized) return;
-            _config.WindowsTopmostIfHsForeground = true;
-            _playerWindow.Topmost = true;
-            _opponentWindow.Topmost = true;
-            SaveConfig(false);
-        }
+		private void CheckboxHideDecksInOverlay_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized)
+				return;
+			Config.Instance.HideDecksInOverlay = true;
+			SaveConfig(true);
+		}
 
-        private void CheckboxWinTopmostHsForeground_Unchecked(object sender, RoutedEventArgs e)
+		private void CheckboxHideDecksInOverlay_Unchecked(object sender, RoutedEventArgs e)
         {
-            if (!_initialized) return;
-            _config.WindowsTopmostIfHsForeground = false;
-            SaveConfig(false);
-        }
-
-        private void CheckboxDeckDetection_Checked(object sender, RoutedEventArgs e)
-        {
-            if (!_initialized) return;
-            _config.AutoDeckDetection = true;
-            CheckboxAutoSelectDeck.IsEnabled = true;
-            SaveConfig(false);
-        }
-
-        private void CheckboxDeckDetection_Unchecked(object sender, RoutedEventArgs e)
-        {
-            if (!_initialized) return;
-            _config.AutoDeckDetection = false;
-            CheckboxAutoSelectDeck.IsChecked = false;
-            CheckboxAutoSelectDeck.IsEnabled = false;
-            SaveConfig(false);
-        }
-
-        private void CheckboxAutoSelectDeck_Checked(object sender, RoutedEventArgs e)
-        {
-            if (!_initialized) return;
-            _config.AutoSelectDetectedDeck = true;
-            SaveConfig(false);
-        }
-        private void CheckboxAutoSelectDeck_Unchecked(object sender, RoutedEventArgs e)
-        {
-            if (!_initialized) return;
-            _config.AutoSelectDetectedDeck = true;
-            SaveConfig(false);
-        }
-        
-        private void RangeSliderPlayer_CentralThumbDragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
-        {
+			if (!_initialized)
+				return;
+			Config.Instance.HideDecksInOverlay = false;
             SaveConfig(true);
         }
 
-        private void RangeSliderPlayer_LowerThumbDragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+		private async void CheckboxAppData_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			var path = Config.Instance.ConfigPath;
+			Config.Instance.SaveInAppData = true;
+			XmlManager<Config>.Save(path, Config.Instance);
+			await Restart();
+		}
+
+		private async void CheckboxAppData_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			var path = Config.Instance.ConfigPath;
+			Config.Instance.SaveInAppData = false;
+			XmlManager<Config>.Save(path, Config.Instance);
+			await Restart();
+		}
+
+		private void CheckboxManaCurveMyDecks_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.ManaCurveMyDecks = true;
+			ManaCurveMyDecks.Visibility = Visibility.Visible;
+			SaveConfig(false);
+		}
+
+		private void CheckboxManaCurveMyDecks_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.ManaCurveMyDecks = false;
+			ManaCurveMyDecks.Visibility = Visibility.Collapsed;
+			SaveConfig(false);
+		}
+
+		private void CheckboxManaCurveNewDeck_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.ManaCurveNewDeck = true;
+			ManaCurveNewDeck.Visibility = Visibility.Visible;
+			SaveConfig(false);
+		}
+
+		private void CheckboxManaCurveNewDeck_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.ManaCurveNewDeck = false;
+			ManaCurveNewDeck.Visibility = Visibility.Collapsed;
+			SaveConfig(false);
+		}
+
+		private async void CheckboxTrackerCardToolTips_Checked(object sender, RoutedEventArgs e)
+		{
+			//this is probably somehow possible without restarting
+			if (!_initialized) return;
+			Config.Instance.TrackerCardToolTips = true;
+			SaveConfig(false);
+			await Restart();
+		}
+
+		private async void CheckboxTrackerCardToolTips_Unchecked(object sender, RoutedEventArgs e)
+		{
+			//this is probably somehow possible without restarting
+			if (!_initialized) return;
+			Config.Instance.TrackerCardToolTips = false;
+			SaveConfig(false);
+			await Restart();
+		}
+
+		private void CheckboxWindowCardToolTips_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.WindowCardToolTips = true;
+			SaveConfig(false);
+		}
+
+		private void CheckboxWindowCardToolTips_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.WindowCardToolTips = false;
+			SaveConfig(false);
+		}
+
+		private void CheckboxOverlayCardToolTips_Checked(object sender, RoutedEventArgs e)
         {
+			if (!_initialized) return;
+			Config.Instance.OverlayCardToolTips = true;
+			CheckboxOverlayAdditionalCardToolTips.IsEnabled = true;
             SaveConfig(true);
         }
 
-        private void RangeSliderPlayer_UpperThumbDragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+		private void CheckboxOverlayCardToolTips_Unchecked(object sender, RoutedEventArgs e)
         {
+			if (!_initialized) return;
+			Config.Instance.OverlayCardToolTips = false;
+			CheckboxOverlayAdditionalCardToolTips.IsChecked = false;
+			CheckboxOverlayAdditionalCardToolTips.IsEnabled = false;
             SaveConfig(true);
         }
 
-        private void RangeSliderOpponent_UpperThumbDragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+		private void CheckboxLogGames_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			TextboxLogGamesPath.IsEnabled = true;
+			BtnLogGamesSelectDir.IsEnabled = true;
+			Config.Instance.SavePlayedGames = true;
+			if (TextboxLogGamesPath.Text.Length == 0)
+				TextboxLogGamesPath.BorderBrush = new SolidColorBrush(Colors.Red);
+			SaveConfig(false);
+		}
+
+		private void CheckboxLogGames_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			TextboxLogGamesPath.IsEnabled = false;
+			BtnLogGamesSelectDir.IsEnabled = false;
+			Config.Instance.SavePlayedGames = false;
+			SaveConfig(false);
+		}
+
+		private void BtnLogGamesSelectDir_Click(object sender, RoutedEventArgs e)
+		{
+			var folderDialog = new FolderBrowserDialog();
+			var result = folderDialog.ShowDialog();
+			if (result == System.Windows.Forms.DialogResult.OK)
+			{
+				TextboxLogGamesPath.Text = folderDialog.SelectedPath;
+				Config.Instance.SavePlayedGamesPath = folderDialog.SelectedPath;
+
+				TextboxLogGamesPath.BorderBrush =
+					new SolidColorBrush(TextboxLogGamesPath.Text.Length == 0
+											? Colors.Red
+											: SystemColors.ActiveBorderColor);
+				SaveConfig(false);
+			}
+		}
+
+		private void CheckboxDeckSortingClassFirst_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.CardSortingClassFirst = true;
+			SaveConfig(false);
+			Helper.SortCardCollection(ListViewDeck.ItemsSource, true);
+			Helper.SortCardCollection(ListViewNewDeck.Items, true);
+		}
+
+		private void CheckboxDeckSortingClassFirst_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.CardSortingClassFirst = false;
+			SaveConfig(false);
+			Helper.SortCardCollection(ListViewDeck.ItemsSource, false);
+			Helper.SortCardCollection(ListViewNewDeck.Items, false);
+		}
+
+		private void CheckboxBringHsToForegorund_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.BringHsToForeground = true;
+			SaveConfig(false);
+		}
+
+		private void CheckboxBringHsToForegorund_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.BringHsToForeground = false;
+			SaveConfig(false);
+		}
+
+		private void CheckboxFlashHs_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.FlashHsOnTurnStart = true;
+			SaveConfig(false);
+		}
+
+		private void CheckboxFlashHs_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.FlashHsOnTurnStart = false;
+			SaveConfig(false);
+		}
+
+		private void CheckboxHideSecrets_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HideSecrets = true;
+			SaveConfig(false);
+			Overlay.HideSecrets();
+		}
+
+		private void CheckboxHideSecrets_Unchecked(object sender, RoutedEventArgs e)
         {
+			if (!_initialized) return;
+			Config.Instance.HideSecrets = false;
+			SaveConfig(false);
+			if (!Game.IsInMenu)
+				Overlay.ShowSecrets(Game.PlayingAgainst);
+		}
+
+		private void CheckboxHighlightDiscarded_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HighlightDiscarded = true;
+			Game.HighlightDiscarded = true;
+            SaveConfig(true);
+        }
+
+		private void CheckboxHighlightDiscarded_Unchecked(object sender, RoutedEventArgs e)
+        {
+			if (!_initialized) return;
+			Config.Instance.HighlightDiscarded = false;
+			Game.HighlightDiscarded = false;
+            SaveConfig(true);
+        }
+
+		private async void BtnUnlockOverlay_Click(object sender, RoutedEventArgs e)
+		{
+			if (User32.GetHearthstoneWindow() == IntPtr.Zero) return;
+			BtnUnlockOverlay.Content = await Overlay.UnlockUI() ? "Lock" : "Unlock";
+		}
+
+		private async void BtnResetOverlay_Click(object sender, RoutedEventArgs e)
+		{
+			var result =
+				await
+				this.ShowMessageAsync("Resetting overlay to default",
+									  "Positions of: Player Deck, Opponent deck, Timers and Secrets will be reset to default. Are you sure?",
+									  MessageDialogStyle.AffirmativeAndNegative);
+			if (result != MessageDialogResult.Affirmative)
+				return;
+
+			if ((string)BtnUnlockOverlay.Content == "Lock")
+        {
+				await Overlay.UnlockUI();
+				BtnUnlockOverlay.Content = "Unlock";
+			}
+
+			var defaultConfig = new Config();
+
+			Config.Instance.PlayerDeckTop = defaultConfig.PlayerDeckTop;
+			Config.Instance.PlayerDeckLeft = defaultConfig.PlayerDeckLeft;
+			Config.Instance.PlayerDeckHeight = defaultConfig.PlayerDeckHeight;
+
+			Config.Instance.OpponentDeckTop = defaultConfig.OpponentDeckTop;
+			Config.Instance.OpponentDeckLeft = defaultConfig.OpponentDeckLeft;
+			Config.Instance.OpponentDeckHeight = defaultConfig.OpponentDeckHeight;
+
+			Config.Instance.TimersHorizontalPosition = defaultConfig.TimersHorizontalPosition;
+			Config.Instance.TimersHorizontalSpacing = defaultConfig.TimersHorizontalSpacing;
+
+			Config.Instance.SecretsTop = defaultConfig.SecretsTop;
+			Config.Instance.SecretsLeft = defaultConfig.SecretsLeft;
 
             SaveConfig(true);
         }
 
-        private void RangeSliderOpponent_LowerThumbDragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
-        {
-            SaveConfig(true);
-        }
+		private void CheckboxRemoveCards_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized || !Game.IsUsingPremade) return;
+			Config.Instance.RemoveCardsFromDeck = true;
+			SaveConfig(false);
+			Game.Reset();
+			Game.SetPremadeDeck((Deck)DeckPickerList.SelectedDeck.Clone());
+			HsLogReader.Instance.Reset(true);
+			Overlay.Update(true);
+		}
 
-        private void RangeSliderOpponent_CentralThumbDragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
-        {
-            SaveConfig(true);
-        }
+		private void CheckboxRemoveCards_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized || !Game.IsUsingPremade) return;
+			Config.Instance.RemoveCardsFromDeck = false;
+			SaveConfig(false);
+			Game.Reset();
+			Game.SetPremadeDeck((Deck)DeckPickerList.SelectedDeck.Clone());
+			HsLogReader.Instance.Reset(true);
+			Overlay.Update(true);
+		}
 
-        private void SliderOverlayPlayerScaling_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		private void CheckboxHighlightLastDrawn_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HighlightLastDrawn = true;
+			SaveConfig(false);
+		}
+
+		private void CheckboxHighlightLastDrawn_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.HighlightLastDrawn = false;
+			SaveConfig(false);
+		}
+
+		private void CheckboxStartMinimized_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.StartMinimized = true;
+			SaveConfig(false);
+		}
+
+		private void CheckboxStartMinimized_Unchecked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            var scaling = SliderOverlayPlayerScaling.Value;
-            _config.OverlayPlayerScaling = scaling;
+			Config.Instance.StartMinimized = false;
             SaveConfig(false);
-             _overlay.UpdateScaling();
+		}
 
-            if (_config.UseSameScaling && SliderOverlayOpponentScaling.Value != scaling)
+		private void CheckboxShowPlayerGet_Checked(object sender, RoutedEventArgs e)
             {
-                SliderOverlayOpponentScaling.Value = scaling;
+			if (!_initialized) return;
+			Config.Instance.ShowPlayerGet = true;
+			Overlay.Update(true);
             }
+
+		private void CheckboxShowPlayerGet_Unchecked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.ShowPlayerGet = false;
+			Overlay.Update(true);
         }
 
-        private void SliderOverlayOpponentScaling_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		private void CheckboxOverlayAdditionalCardToolTips_Checked(object sender, RoutedEventArgs e)
         {
             if (!_initialized) return;
-            var scaling = SliderOverlayOpponentScaling.Value;
-            _config.OverlayOpponentScaling = scaling;
+			Config.Instance.AdditionalOverlayTooltips = true;
             SaveConfig(false);
-             _overlay.UpdateScaling();
+		}
 
-            if (_config.UseSameScaling && SliderOverlayPlayerScaling.Value != scaling)
+		private void CheckboxOverlayAdditionalCardToolTips_Unchecked(object sender, RoutedEventArgs e)
             {
-                SliderOverlayPlayerScaling.Value = scaling;
+			if (!_initialized) return;
+			Config.Instance.AdditionalOverlayTooltips = false;
+			SaveConfig(false);
             }
+
+		private void ToggleSwitchExtraFeatures_Checked(object sender, RoutedEventArgs e)
+		{
+			if (!_initialized) return;
+			Config.Instance.ExtraFeatures = true;
+			Overlay.HookMouse();
+			SaveConfig(false);
         }
         
-        private void Hyperlink_RequestNavigate(object sender, System.Windows.Navigation.RequestNavigateEventArgs e)
+		private void ToggleSwitchExtraFeatures_Unchecked(object sender, RoutedEventArgs e)
         {
-            Process.Start(e.Uri.AbsoluteUri);
+			if (!_initialized) return;
+			Config.Instance.ExtraFeatures = false;
+			Overlay.UnHookMouse();
+			SaveConfig(false);
         }
 
-
-        private void CheckboxHideTimers_Checked(object sender, RoutedEventArgs e)
-        {
-            if (!_initialized) return;
-            _config.HideTimers = true;
-            SaveConfig(true);
-        }
-        
-        private void CheckboxHideTimers_Unchecked(object sender, RoutedEventArgs e)
-        {
-            if (!_initialized) return;
-            _config.HideTimers = false;
-            SaveConfig(true);
-        }
-
-        private void SliderTimersHorizontal_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-        {
-            if (!_initialized) return;
-            _config.TimersHorizontalPosition = SliderTimersHorizontal.Value;
-            SaveConfig(true);
-        }
-
-        private void SliderTimersHorizontalSpacing_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-        {
-            if (!_initialized) return;
-            _config.TimersHorizontalSpacing = SliderTimersHorizontalSpacing.Value;
-            SaveConfig(true);
-        }
-
-        private void SliderTimersVertical_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-        {
-            if (!_initialized) return;
-            _config.TimersVerticalPosition = SliderTimersVertical.Value;
-            SaveConfig(true);
-        }
-
-        private void SliderTimersVerticalSpacing_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-        {
-            if (!_initialized) return;
-            _config.TimersVerticalSpacing = SliderTimersVerticalSpacing.Value;
-            SaveConfig(true);
-        }
         #endregion
 
+		#region Constructor
+
+		// Logic for dealing with legacy config file semantics
+		// Use difference of versions to determine what should be done
+
+		public MainWindow()
+		{
+			InitializeComponent();
+
+			Helper.MainWindow = this;
+			_configPath = Config.Load();
+			HsLogReader.Create();
+
+			var configVersion = string.IsNullOrEmpty(Config.Instance.CreatedByVersion)
+									? null
+									: new Version(Config.Instance.CreatedByVersion);
+
+			var currentVersion = Helper.CheckForUpdates(out NewVersion);
+			if (currentVersion != null)
+			{
+				TxtblockVersion.Text = string.Format("Version: {0}.{1}.{2}", currentVersion.Major, currentVersion.Minor,
+													 currentVersion.Build);
+
+				// Assign current version to the config instance so that it will be saved when the config
+				// is rewritten to disk, thereby telling us what version of the application created it
+				Config.Instance.CreatedByVersion = currentVersion.ToString();
+			}
+
+			ConvertLegacyConfig(currentVersion, configVersion);
+
+			if (Config.Instance.SelectedTags.Count == 0)
+				Config.Instance.SelectedTags.Add("All");
+
+			if (Config.Instance.GenerateLog)
+			{
+				Directory.CreateDirectory("Logs");
+				var listener = new TextWriterTraceListener(Config.Instance.LogFilePath);
+				Trace.Listeners.Add(listener);
+				Trace.AutoFlush = true;
+			}
+
+			_foundHsDirectory = FindHearthstoneDir();
+
+			if (_foundHsDirectory)
+				_updatedLogConfig = UpdateLogConfigFile();
+
+			//hearthstone, loads db etc - needs to be loaded before playerdecks, since cards are only saved as ids now
+			//Game.Create();
+			Game.Reset();
+
+			_decksPath = Config.Instance.HomeDir + "PlayerDecks.xml";
+			SetupDeckListFile();
+			try
+			{
+				DeckList = XmlManager<Decks>.Load(_decksPath);
+			}
+			catch (Exception e)
+			{
+				MessageBox.Show(
+					e.Message + "\n\n" + e.InnerException +
+					"\n\n If you don't know how to fix this, please delete " + _decksPath +
+					" (this will cause you to lose your decks).",
+					"Error loading PlayerDecks.xml");
+				Application.Current.Shutdown();
+			}
+
+			foreach (var deck in DeckList.DecksList)
+			{
+				DeckPickerList.AddDeck(deck);
+			}
+
+			_notifyIcon = new NotifyIcon { Icon = new Icon(@"Images/HearthstoneDeckTracker.ico") };
+			_notifyIcon.MouseDoubleClick += NotifyIconOnMouseDoubleClick;
+			_notifyIcon.Visible = false;
+
+			NewDeck = new Deck();
+			ListViewNewDeck.ItemsSource = NewDeck.Cards;
+
+			//create overlay
+			Overlay = new OverlayWindow { Topmost = true };
+			if (_foundHsDirectory)
+				Overlay.Show();
+
+			PlayerWindow = new PlayerWindow(Config.Instance, Game.IsUsingPremade ? Game.PlayerDeck : Game.PlayerDrawn);
+			OpponentWindow = new OpponentWindow(Config.Instance, Game.OpponentCards);
+			TimerWindow = new TimerWindow(Config.Instance);
+
+			if (Config.Instance.WindowsOnStartup)
+			{
+				PlayerWindow.Show();
+				OpponentWindow.Show();
+			}
+			if (Config.Instance.TimerWindowOnStartup)
+			{
+				TimerWindow.Show();
+			}
+			if (!DeckList.AllTags.Contains("All"))
+			{
+				DeckList.AllTags.Add("All");
+				WriteDecks();
+			}
+			if (!DeckList.AllTags.Contains("Arena"))
+			{
+				DeckList.AllTags.Add("Arena");
+				WriteDecks();
+			}
+			if (!DeckList.AllTags.Contains("Constructed"))
+			{
+				DeckList.AllTags.Add("Constructed");
+				WriteDecks();
+			}
+
+			ComboboxAccent.ItemsSource = ThemeManager.Accents;
+			ComboboxTheme.ItemsSource = ThemeManager.AppThemes;
+			ComboboxLanguages.ItemsSource = Helper.LanguageDict.Keys;
+
+			ComboboxKeyPressGameStart.ItemsSource = EventKeys;
+			ComboboxKeyPressGameEnd.ItemsSource = EventKeys;
+
+			LoadConfig();
+
+			//this has to happen before reader starts
+			var lastDeck = DeckList.DecksList.FirstOrDefault(d => d.Name == Config.Instance.LastDeck);
+			DeckPickerList.SelectDeck(lastDeck);
+
+			DeckOptionsFlyout.DeckOptionsButtonClicked += sender => { FlyoutDeckOptions.IsOpen = false; };
+
+			DeckImportFlyout.DeckOptionsButtonClicked += sender => { FlyoutDeckImport.IsOpen = false; };
+
+			TurnTimer.Create(90);
+
+			SortFilterDecksFlyout.HideStuffToCreateNewTag();
+			TagControlNewDeck.OperationSwitch.Visibility = Visibility.Collapsed;
+			TagControlMyDecks.OperationSwitch.Visibility = Visibility.Collapsed;
+			TagControlNewDeck.PnlSortDecks.Visibility = Visibility.Collapsed;
+			TagControlMyDecks.PnlSortDecks.Visibility = Visibility.Collapsed;
+
+			//SortFilterDecksFlyout.SelectedTagsChanged += SortFilterDecksFlyoutOnSelectedTagsChanged;
+			//SortFilterDecksFlyout.OperationChanged += SortFilterDecksFlyoutOnOperationChanged;
+
+			UpdateDbListView();
+
+			_doUpdate = _foundHsDirectory;
+			UpdateOverlayAsync();
+
+			_initialized = true;
+
+			DeckPickerList.UpdateList();
+			if (lastDeck != null)
+			{
+				DeckPickerList.SelectDeck(lastDeck);
+				UpdateDeckList(lastDeck);
+				UseDeck(lastDeck);
+			}
+
+			if (_foundHsDirectory)
+			{
+				HsLogReader.Instance.Start();
+			}
+
+			Helper.SortCardCollection(ListViewDeck.Items, Config.Instance.CardSortingClassFirst);
+			DeckPickerList.SortDecks();
+		}
+
+		private static void ConvertLegacyConfig(Version currentVersion, Version configVersion)
+		{
+			var config = Config.Instance;
+			var converted = false;
+
+			if (configVersion == null) // Here we assume config file was created prior to version tracking
+			{
+				// We previously assumed negative pixel coordinates were invalid, but in fact they can go negative
+				// with multi-screen setups. Negative positions were being used to represent 'no specific position'
+				// as a default. That means that when the windows are created for the first time, we let the operating
+				// system decide where to place them. As we should not be using negative positions for this purpose, since
+				// they are in fact a valid range of pixel positions, we now use nullable types instead. The default
+				// 'no specific position' is now expressed when the positions are null.
+				{
+					if (config.TrackerWindowLeft.HasValue && config.TrackerWindowLeft.Value < 0)
+					{
+						config.TrackerWindowLeft = Config.Defaults.TrackerWindowLeft;
+						converted = true;
+					}
+					if (config.TrackerWindowTop.HasValue && config.TrackerWindowTop.Value < 0)
+					{
+						config.TrackerWindowTop = Config.Defaults.TrackerWindowTop;
+						converted = true;
+					}
+
+					if (config.PlayerWindowLeft.HasValue && config.PlayerWindowLeft.Value < 0)
+					{
+						config.PlayerWindowLeft = Config.Defaults.PlayerWindowLeft;
+						converted = true;
+					}
+					if (config.PlayerWindowTop.HasValue && config.PlayerWindowTop.Value < 0)
+					{
+						config.PlayerWindowTop = Config.Defaults.PlayerWindowTop;
+						converted = true;
+					}
+
+					if (config.OpponentWindowLeft.HasValue && config.OpponentWindowLeft.Value < 0)
+					{
+						config.OpponentWindowLeft = Config.Defaults.OpponentWindowLeft;
+						converted = true;
+					}
+					if (config.OpponentWindowTop.HasValue && config.OpponentWindowTop.Value < 0)
+					{
+						config.OpponentWindowTop = Config.Defaults.OpponentWindowTop;
+						converted = true;
+					}
+
+					if (config.TimerWindowLeft.HasValue && config.TimerWindowLeft.Value < 0)
+					{
+						config.TimerWindowLeft = Config.Defaults.TimerWindowLeft;
+						converted = true;
+					}
+					if (config.TimerWindowTop.HasValue && config.TimerWindowTop.Value < 0)
+					{
+						config.TimerWindowTop = Config.Defaults.TimerWindowTop;
+						converted = true;
+					}
+				}
+
+				// Player and opponent window heights were previously set to zero as a default, and then
+				// a bit of logic was used when creating the windows: if height == 0, then set height to 400.
+				// This was a little pointless and also inconsistent with the way the default timer window
+				// dimensions were implemented. Unfortunately we cannot make this consistent without
+				// breaking legacy config files, where the height will still be stored as zero. So
+				// we handle the changed semantics here.
+				{
+					if (config.PlayerWindowHeight == 0)
+					{
+						config.PlayerWindowHeight = Config.Defaults.PlayerWindowHeight;
+						converted = true;
+					}
+
+					if (config.OpponentWindowHeight == 0)
+					{
+						config.OpponentWindowHeight = Config.Defaults.OpponentWindowHeight;
+						converted = true;
+					}
+				}
+			}
+
+			if (converted)
+			{
+				Config.SaveBackup();
+				Config.Save();
+			}
+		}
+
+		private bool FindHearthstoneDir()
+		{
+			var found = false;
+			if (string.IsNullOrEmpty(Config.Instance.HearthstoneDirectory) ||
+				!File.Exists(Config.Instance.HearthstoneDirectory + @"\Hearthstone.exe"))
+			{
+				using (
+					var hsDirKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Hearthstone")
+					)
+				{
+					if (hsDirKey != null)
+					{
+						var hsDir = (string)hsDirKey.GetValue("InstallLocation");
+
+						//verify the installlocation actually is correct (possibly moved?)
+						if (File.Exists(hsDir + @"\Hearthstone.exe"))
+						{
+							Config.Instance.HearthstoneDirectory = hsDir;
+							Config.Save();
+							found = true;
+						}
+					}
+				}
+			}
+			else
+			{
+				found = true;
+			}
+
+			return found;
+		}
+
+		private bool UpdateLogConfigFile()
+		{
+			var updated = false;
+			//check for log config and create if not existing
+			try
+			{
+				//always overwrite is true by default. 
+				if (!File.Exists(_logConfigPath))
+				{
+					updated = true;
+					File.Copy("Files/log.config", _logConfigPath, true);
+					Logger.WriteLine(string.Format("Copied log.config to {0} (did not exist)", _configPath));
+				}
+				else
+				{
+					//update log.config if newer
+					var localFile = new FileInfo(_logConfigPath);
+					var file = new FileInfo("Files/log.config");
+					if (file.LastWriteTime > localFile.LastWriteTime)
+					{
+						updated = true;
+						File.Copy("Files/log.config", _logConfigPath, true);
+						Logger.WriteLine(string.Format("Copied log.config to {0} (file newer)", _configPath));
+					}
+					else if (Config.Instance.AlwaysOverwriteLogConfig)
+					{
+						File.Copy("Files/log.config", _logConfigPath, true);
+						Logger.WriteLine(string.Format("Copied log.config to {0} (AlwaysOverwriteLogConfig)", _configPath));
+					}
+				}
+			}
+			catch (Exception e)
+			{
+				if (_updatedLogConfig)
+				{
+					MessageBox.Show(
+						e.Message + "\n\n" + e.InnerException +
+						"\n\n Please manually copy the log.config from the Files directory to \"%LocalAppData%/Blizzard/Hearthstone\".",
+						"Error writing log.config");
+					Application.Current.Shutdown();
+				}
+			}
+			return updated;
+		}
+
+		private void SetupDeckListFile()
+		{
+			var appDataPath = Config.Instance.AppDataPath + @"\PlayerDecks.xml";
+			const string localPath = "PlayerDecks.xml";
+			if (Config.Instance.SaveInAppData)
+			{
+				if (File.Exists(localPath))
+				{
+					if (File.Exists(appDataPath))
+					{
+						//backup in case the file already exists
+						File.Move(appDataPath, appDataPath + DateTime.Now.ToFileTime());
+					}
+					File.Move(localPath, appDataPath);
+					Logger.WriteLine("Moved decks to appdata");
+				}
+			}
+			else
+			{
+				if (File.Exists(appDataPath))
+				{
+					if (File.Exists(localPath))
+					{
+						//backup in case the file already exists
+						File.Move(localPath, localPath + DateTime.Now.ToFileTime());
+					}
+					File.Move(appDataPath, localPath);
+					Logger.WriteLine("Moved decks to local");
+				}
+			}
+
+			//load saved decks
+			if (!File.Exists(_decksPath))
+			{
+				//avoid overwriting decks file with new releases.
+				using (var sr = new StreamWriter(_decksPath, false))
+				{
+					sr.WriteLine("<Decks></Decks>");
+				}
+			}
+			else if (!File.Exists(_decksPath + ".old"))
+			{
+				//the new playerdecks.xml wont work with versions below 0.2.19, make copy
+				File.Copy(_decksPath, _decksPath + ".old");
+			}
+		}
+
+		#endregion
     }
 }

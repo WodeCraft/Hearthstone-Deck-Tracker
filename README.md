@@ -3,30 +3,56 @@ Hearthstone-Deck-Tracker
 
 This is an automatic deck tracker for Hearthstone.
 
-**Features:**  
-- Tracks cards drawn from deck (or cards left in deck), handcount and drawchances of remaining cards  
-- Tracks cards played by the opponent and his handcount  
+The ingame overlay:
 
-**How it works:**  
+![Overlay](http://i.imgur.com/EWd6Ung.jpg "The overlay")
+
+The app: 
+
+![Overlay](http://i.imgur.com/T7beWjm.png "The tracker")
+
+
+Features:
+=========
+- **Tracks**:
+  - Cards left in your deck or cards drawn from your deck.
+  - Your handcount, deckcount and draw chances.
+  - Cards played by your opponent.
+  - Your opponent's handcount, deckcount and probablities of him having/drawing cards.
+  - How long your opponent had each card in his hand and what cards have been mulliganed, stolen or returned.  
+- **Timer** for the current turn and total time spent for you and your opponent.  
+- The tracker tries to **automatically select the deck you are playing**.  
+- The cards and timer can either be displayed in an overlay (see screenshot) or in **extra windows** (Options > General > Additional Windows)  
+- **Deck Manager**:
+  - **Import** decks from websites: arenavalue, hearthstats, hearthpwn, hearthhead, hearthstoneplayers, tempostorm, hearthstonetopdeck and hearthnews  
+  - Circumvent the 9 deck limit: Saved decks can be **exported to Hearthstone**. (My Decks > More...)   
+  - Decks can be filtered by custom **tags** and sorted by name, date and tags.  
+  - Set **notes** for each deck (My Decks > More...)  
+  - Create **screenshots** of decks (My Decks > More...)  
+  - **Share** your decks by exporting them as xml files or id-strings (My Decks > More...). Both can be imported via New Deck > Import.  
+- **Notifications**: get notified when a game or a turn starts (either by the tray icon flashing or hearthstone popping up)  
+- **Customization**: Almost every feature can be turned on/off separately.
+
+
+How to use: 
+===========
+1) Download latest release [here](https://github.com/Epix37/Hearthstone-Deck-Tracker/releases) (green button)  
+2) Extract file (using e.g. [WinRAR](http://www.win-rar.com/))  
+3) Run "Hearthstone Deck Tracker.exe"  
+4) Create your decks under "New Deck" (or import from any of the supported websites), click save.  
+5) Play!
+
+
+How it works:
+=============
 The automated tracking is done my reading out Hearthstone logfile.  
-More information on that  here: http://www.reddit.com/r/hearthstone/comments/268fkk/simple_hearthstone_logging_see_your_complete_play
+More information on that here:  http://www.reddit.com/r/hearthstone/comments/268fkk/simple_hearthstone_logging_see_your_complete_play
 
-**What you need to run this:**
-- Windows Vista or higher (I have not actually tested it on vista but anything above XP should work fine)
+Requirements:
+=============
+- Windows Vista or higher
 - .NET Framework 4.5
-- If you run this for the first time you will have to restart Hearthstone once for it start logging the way required for this tracker.
 
-**FAQ:**
-- Nothing happens
-  - Try restarting Hearthstone, the Tracker, and try starting the Tracker as Administrator.
-  - If that does not help, go into the config.xml file and delete what's in <HearthstoneDirectory>.
-  - Do you have .NET 4.5 installed?
-- My deck is not on the screen or far off to the right
- - This seems to be a problem with laptops for some reason. You will have to set Custom Width/Height and maybe Offset values in the config.xml. [See here for reference](http://www.reddit.com/r/hearthstone/comments/26seey/automatic_deck_tracker_and_more_with_ingame/chv32lx) 
-tl;dr: Open the config.xml, set VisibleOverlay to true, set CustomWidth and CustomHeight so something around 20% lower than Hearthstone's resolution. You may have to play around with those values a bit. If you have any idea why this happens please contact me
 
-**Known Issues:**
-- There seem to be some issues with fullscreen mode in general.
-- Your opponent's deck may cover up some of your friendslist. (You can hide the cards in the options menu though)
-- There may still be some rare problems with the deck/hand counting. If you notice this (and optimally notices what caused it) let me know.
-- Performance when moving the decks on the overlay it not the greatest currently.
+Donations are always appreciated
+[![PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donate_SM.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=PZDMUT88NLFYJ)
